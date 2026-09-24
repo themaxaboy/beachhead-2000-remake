@@ -1,0 +1,25 @@
+{
+  "name": "beachhead-2000-remake",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unofficial fan remake of Beach Head 2000 for the web, built with Three.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "fetch-assets": "node scripts/fetch-assets.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "dependencies": {
+    "three": "~0.186.1"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1",
+    "vite": "^8.3.1"
+  }
+}
