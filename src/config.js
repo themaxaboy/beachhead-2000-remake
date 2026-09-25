@@ -55,10 +55,31 @@ export const CONFIG = {
     shield: 25,
   },
 
+  // Graphics tiers. `auto` picks one from the GPU and then scales the resolution between dynResMin and pixelRatio.
+  // post 'direct' renders straight to the canvas (no half-float composer targets): the biggest saving on old iGPUs.
+  // water: q = shader feature level 0..3, waves = Gerstner count, grid = [angular, radial] segments,
+  //        reflection = planar reflection target size (0 = sky/environment only), wakes = boats with foam wakes.
   quality: {
-    low: { pixelRatio: 0.75, shadows: 0, bloom: false, msaa: 0, water: 'simple', particles: 1500, grass: 0 },
-    medium: { pixelRatio: 1, shadows: 1024, bloom: true, msaa: 2, water: 512, particles: 4000, grass: 1400 },
-    high: { pixelRatio: 1.5, shadows: 2048, bloom: true, msaa: 4, water: 1024, particles: 5000, grass: 3000 },
+    low: {
+      pixelRatio: 0.75, dynResMin: 0.5, post: 'direct', shadows: 0, bloom: false, msaa: 0, godRays: false,
+      water: { q: 0, waves: 4, grid: [192, 72], reflection: 0, wakes: 0 },
+      terrainSeg: 192, particles: 1200, grass: 0, explosionLights: 1,
+    },
+    medium: {
+      pixelRatio: 1, dynResMin: 0.6, post: 'composer', shadows: 1024, bloom: true, msaa: 2, godRays: false,
+      water: { q: 1, waves: 6, grid: [320, 110], reflection: 256, wakes: 4 },
+      terrainSeg: 256, particles: 3000, grass: 1400, explosionLights: 2,
+    },
+    high: {
+      pixelRatio: 1.25, dynResMin: 0.75, post: 'composer', shadows: 2048, bloom: true, msaa: 4, godRays: true,
+      water: { q: 2, waves: 8, grid: [448, 150], reflection: 512, wakes: 6 },
+      terrainSeg: 320, particles: 5000, grass: 3000, explosionLights: 4,
+    },
+    ultra: {
+      pixelRatio: 2, dynResMin: 1, post: 'composer', shadows: 4096, bloom: true, msaa: 4, godRays: true,
+      water: { q: 3, waves: 8, grid: [640, 200], reflection: 1024, wakes: 8 },
+      terrainSeg: 400, particles: 5000, grass: 5000, explosionLights: 4,
+    },
   },
 
   timeOfDay: {

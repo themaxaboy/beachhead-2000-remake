@@ -84,6 +84,28 @@ export function installDebug(game) {
     renderOnce() {
       game.draw(1 / 60);
     },
+    /** Renders `frames` frames back to back (GPU-synchronised) and reports the average cost. */
+    bench(frames = 60) {
+      const gl = game.renderer.renderer.getContext();
+      const px = new Uint8Array(4);
+      const sync = () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      game.draw(1 / 60);
+      sync();
+      const t0 = performance.now();
+      for (let i = 0; i < frames; i++) {
+        game.draw(1 / 60);
+        sync();
+      }
+      const ms = (performance.now() - t0) / frames;
+      const info = game.renderer.renderer.info.render;
+      return {
+        tier: game.tier,
+        pixelRatio: game.renderer.pixelRatio,
+        ms: Math.round(ms * 100) / 100,
+        calls: info.calls,
+        triangles: info.triangles,
+      };
+    },
     hud(v) {
       document.getElementById('hud').style.visibility = v ? '' : 'hidden';
       document.getElementById('ui').style.visibility = v ? '' : 'hidden';

@@ -50,22 +50,28 @@ export function isWater(x, z) {
   return heightAt(x, z) < 0;
 }
 
+/** Terrain grid: dense around the bunker, stretching out to the world edge. */
+export function terrainGeometry(seg) {
+  const S = CONFIG.world.size;
+  const k = 0.07;
+  const geo = new THREE.PlaneGeometry(2, 2, seg, seg);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const remap = (u) => S * (k * u + (1 - k) * u * u * u);
+  for (let i = 0; i < pos.count; i++) {
+    const x = remap(pos.getX(i));
+    const z = remap(pos.getZ(i));
+    pos.setXYZ(i, x, heightAt(x, z), z);
+  }
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 export class Terrain {
-  constructor(assets) {
-    const S = CONFIG.world.size;
-    const k = 0.07;
-    const seg = 320;
-    const geo = new THREE.PlaneGeometry(2, 2, seg, seg);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.attributes.position;
-    const remap = (u) => S * (k * u + (1 - k) * u * u * u);
-    for (let i = 0; i < pos.count; i++) {
-      const x = remap(pos.getX(i));
-      const z = remap(pos.getZ(i));
-      pos.setXYZ(i, x, heightAt(x, z), z);
-    }
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
+  constructor(assets, seg = 320) {
+    this.seg = seg;
+    const geo = terrainGeometry(seg);
 
     const dry = assets.textures.coast_sand_01;
     const wet = assets.textures.damp_beach_sand;
@@ -138,6 +144,13 @@ export class Terrain {
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
     this.mesh.name = 'terrain';
+  }
+
+  setSegments(seg) {
+    if (!seg || seg === this.seg) return;
+    this.seg = seg;
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = terrainGeometry(seg);
   }
 
   update(dt) {

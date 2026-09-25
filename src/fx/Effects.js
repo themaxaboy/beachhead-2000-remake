@@ -41,14 +41,16 @@ export class Effects {
     this.tracers = new Tracers(500);
     scene.add(this.tracers.mesh);
 
-    // Pooled explosion lights: always in the scene so the shader never recompiles.
-    this.lights = [];
+    // Pooled explosion lights: always in the scene so the shader never recompiles. Every point light costs
+    // per-pixel shading on all lit surfaces, so the quality tier decides how many are kept (see configure()).
+    this.allLights = [];
     for (let i = 0; i < 4; i++) {
       const l = new THREE.PointLight(0xffaa55, 0, 100, 2);
       l.userData = { t: 0, dur: 0, peak: 0 };
       scene.add(l);
-      this.lights.push(l);
+      this.allLights.push(l);
     }
+    this.lights = this.allLights.slice();
     this.flareLight = new THREE.PointLight(0xfff2d0, 0, 800, 2);
     scene.add(this.flareLight);
 
@@ -116,6 +118,14 @@ export class Effects {
   }
 
   configure(quality, fog, light) {
+    const n = Math.max(1, Math.min(this.allLights.length, quality.explosionLights ?? 4));
+    this.lights = this.allLights.slice(0, n);
+    this.allLights.forEach((l, i) => {
+      l.intensity = 0;
+      l.userData.t = l.userData.dur = 0;
+      if (i < n) this.game.scene.add(l);
+      else this.game.scene.remove(l);
+    });
     this.add.setMax(quality.particles);
     this.alpha.setMax(quality.particles);
     this.glow.setMax(Math.floor(quality.particles / 3));

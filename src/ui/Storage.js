@@ -4,7 +4,9 @@ const SCORES_KEY = 'bh2k.hiscores.v1';
 const PROGRESS_KEY = 'bh2k.progress.v1';
 
 export const DEFAULT_SETTINGS = {
-  quality: 'medium',
+  quality: 'auto', // auto | low | medium | high | ultra
+  autoTier: null, // tier auto quality settled on for autoGpu
+  autoGpu: '',
   sensitivity: 5,
   invertY: false,
   fov: 58,

@@ -6,6 +6,7 @@ import { Input } from './Input.js';
 import { Collision } from './Collision.js';
 import { rng } from './rng.js';
 import { clamp, lerp } from './math.js';
+import { DynamicResolution, TierGovernor, guessTier, gpuName, lowerTier } from './Quality.js';
 import { World } from '../world/World.js';
 import { Bunker } from '../world/Bunker.js';
 import { Effects } from '../fx/Effects.js';
@@ -33,7 +34,12 @@ export class Game {
     this.settings = loadSettings();
     if (flags.quality) this.settings.quality = flags.quality;
     this.canvas = document.getElementById('game');
-    this.renderer = new Renderer(this.canvas, this.settings.quality);
+    this.renderer = new Renderer(this.canvas, 'medium');
+    this.tier = this.resolveTier();
+    this.renderer.setQuality(this.tier);
+    this.dynRes = new DynamicResolution();
+    this.governor = new TierGovernor();
+    this.pendingTier = null;
     this.scene = this.renderer.scene;
     this.camera = this.renderer.camera;
     this.camera.fov = this.settings.fov;
@@ -90,7 +96,7 @@ export class Game {
 
     await this.world.setTimeOfDay(this.level.def.timeOfDay);
     this.applyQuality();
-    window.addEventListener('resize', () => this.effects.setScale(this.renderer.height * this.renderer.pixelRatio, this.camera.fov));
+    this.renderer.onResize = () => this.effects.setScale(this.renderer.height * this.renderer.pixelRatio, this.camera.fov);
     this.menus.show('loading', { progress: 0.95, text: 'PREPARING SHADERS' });
     try {
       await this.renderer.renderer.compileAsync(this.scene, this.camera);
@@ -134,7 +140,10 @@ export class Game {
   setSetting(k, v) {
     this.settings[k] = v;
     saveSettings(this.settings);
-    if (k === 'quality') this.applyQuality();
+    if (k === 'quality') {
+      this.tier = this.resolveTier();
+      this.applyQuality();
+    }
     if (k === 'fov') {
       this.camera.fov = v;
       this.camera.updateProjectionMatrix();
@@ -143,12 +152,53 @@ export class Game {
     if (k === 'master' || k === 'sfx' || k === 'ambience') this.applyVolumes();
   }
 
+  /** The tier to render with: the chosen one, or for 'auto' the cached / detected tier for this GPU. */
+  resolveTier() {
+    const s = this.settings;
+    if (s.quality !== 'auto') return CONFIG.quality[s.quality] ? s.quality : 'medium';
+    const gpu = gpuName(this.renderer.renderer.getContext());
+    if (s.autoTier && s.autoGpu === gpu && CONFIG.quality[s.autoTier]) return s.autoTier;
+    s.autoTier = guessTier({ renderer: gpu, cores: navigator.hardwareConcurrency || 4, pixels: screen.width * screen.height * (window.devicePixelRatio || 1) ** 2 });
+    s.autoGpu = gpu;
+    saveSettings(s);
+    return s.autoTier;
+  }
+
+  get autoQuality() {
+    return this.settings.quality === 'auto';
+  }
+
   applyQuality() {
-    this.renderer.setQuality(this.settings.quality);
+    this.renderer.setQuality(this.tier);
     const q = this.renderer.quality;
     this.world.setQuality(q);
     this.effects.configure(q, this.scene.fog, this.smokeLight());
     this.effects.setScale(this.renderer.height * this.renderer.pixelRatio, this.camera.fov);
+    const max = this.renderer.maxPixelRatio;
+    this.dynRes.setRange(Math.min(q.dynResMin, max), max);
+    this.governor.reset();
+  }
+
+  /** Auto quality: scale the resolution with the frame time and remember when a lower tier is needed. */
+  updateAutoQuality(dt) {
+    if (!this.autoQuality || this.flags.norender || document.hidden) return;
+    if (this.state !== 'playing' && this.state !== 'menu' && this.state !== 'levelEnd') return;
+    const ms = dt * 1000;
+    const pr = this.dynRes.sample(ms);
+    if (pr !== null) this.renderer.setPixelRatio(pr);
+    if (!this.pendingTier && this.governor.sample(ms, this.dynRes.scale <= this.dynRes.min + 1e-3)) {
+      const lower = lowerTier(this.tier);
+      if (lower !== this.tier) this.pendingTier = lower;
+    }
+  }
+
+  /** Applies a tier drop the governor asked for; only called between missions so a fight never hitches. */
+  applyPendingTier() {
+    if (!this.pendingTier || !this.autoQuality) return;
+    this.tier = this.settings.autoTier = this.pendingTier;
+    this.pendingTier = null;
+    saveSettings(this.settings);
+    this.applyQuality();
   }
 
   applyVolumes() {
@@ -178,6 +228,7 @@ export class Game {
     this.hud.show(false);
     this.hud.clear();
     this.clearBattlefield();
+    this.applyPendingTier();
     rng.reseed(this.flags.seed ? this.flags.seed * 1000 + n : (Math.random() * 2 ** 32) >>> 0);
     await this.world.setTimeOfDay(this.flags.time || def.timeOfDay);
     this.effects.configure(this.renderer.quality, this.scene.fog, this.smokeLight());
@@ -300,6 +351,7 @@ export class Game {
     this.input.exitLock();
     this.audio?.resume();
     this.clearBattlefield();
+    this.applyPendingTier();
     this.hud.show(false);
     this.hud.clear();
     this.state = 'menu';
@@ -429,6 +481,7 @@ export class Game {
     const dt = Math.min(0.1, Math.max(0, (now - this.last) / 1000));
     this.last = now;
     this.fps = lerp(this.fps, dt > 0 ? 1 / dt : 60, 0.05);
+    this.updateAutoQuality(dt);
     this.tick(dt);
     if (!this.flags.norender) this.draw(dt);
   }
@@ -541,7 +594,8 @@ export class Game {
     if (this.settings.showFps || this.flags.debug) {
       const info = this.renderer.renderer.info;
       this.fpsEl.style.display = 'block';
-      this.fpsEl.textContent = `${Math.round(this.fps)} FPS · ${info.render.calls} calls · ${Math.round(info.render.triangles / 1000)}k tris`;
+      const scale = `${this.tier}${this.autoQuality ? ' auto' : ''} ×${this.renderer.pixelRatio.toFixed(2)}`;
+      this.fpsEl.textContent = `${Math.round(this.fps)} FPS · ${info.render.calls} calls · ${Math.round(info.render.triangles / 1000)}k tris · ${scale}`;
     } else this.fpsEl.style.display = 'none';
   }
 

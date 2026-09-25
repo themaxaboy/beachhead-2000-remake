@@ -12,7 +12,8 @@ export class Ocean {
     this.setMode(mode);
   }
 
-  setMode(mode) {
+  setMode(water) {
+    const mode = water && typeof water === 'object' ? (water.reflection ? water.reflection : 'simple') : water;
     if (this.mode === mode && this.mesh) return;
     this.mode = mode;
     if (this.mesh) {

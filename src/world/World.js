@@ -11,9 +11,9 @@ export class World {
     this.game = game;
     const { scene, assets, renderer } = game;
     this.sky = new Sky(renderer.renderer, scene, assets);
-    this.terrain = new Terrain(assets);
-    scene.add(this.terrain.mesh);
     const q = renderer.quality;
+    this.terrain = new Terrain(assets, q.terrainSeg);
+    scene.add(this.terrain.mesh);
     this.ocean = new Ocean(assets, scene, q.water);
     this.props = new Props(assets, game.mats, q);
     scene.add(this.props.group);
@@ -33,6 +33,7 @@ export class World {
   }
 
   setQuality(q) {
+    this.terrain.setSegments(q.terrainSeg);
     this.ocean.setMode(q.water);
     this.sky.setShadowSize(q.shadows);
     this.props.setGrass(q.grass);

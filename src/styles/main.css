@@ -38,6 +38,15 @@ body {
   cursor: crosshair;
 }
 
+/* Damage flash / fade / vignette on the Low tier, which renders without post-processing. */
+#fx-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  display: none;
+}
+
 #fps {
   position: fixed;
   top: 6px;

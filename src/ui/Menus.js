@@ -187,7 +187,7 @@ export class Menus {
     const opt = (v, cur, label) => `<option value="${v}"${v === cur ? ' selected' : ''}>${label}</option>`;
     return `<h2>OPTIONS</h2>
       <div class="options">
-        <label>Graphics quality<select data-k="quality">${opt('low', s.quality, 'Low')}${opt('medium', s.quality, 'Medium')}${opt('high', s.quality, 'High')}</select></label>
+        <label>Graphics quality<select data-k="quality">${opt('auto', s.quality, `Auto — ${(this.game.settings.autoTier || 'detect').replace(/^./, (c) => c.toUpperCase())}`)}${opt('low', s.quality, 'Low')}${opt('medium', s.quality, 'Medium')}${opt('high', s.quality, 'High')}${opt('ultra', s.quality, 'Ultra')}</select></label>
         <label>Mouse sensitivity <span class="v" id="v-sensitivity">${s.sensitivity}</span><input type="range" min="1" max="10" step="1" data-k="sensitivity" value="${s.sensitivity}"></label>
         <label>Field of view <span class="v" id="v-fov">${s.fov}°</span><input type="range" min="45" max="75" step="1" data-k="fov" value="${s.fov}"></label>
         <label>Master volume<input type="range" min="0" max="1" step="0.05" data-k="master" value="${s.master}"></label>

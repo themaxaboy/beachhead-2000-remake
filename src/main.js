@@ -1,6 +1,7 @@
 import './styles/main.css';
 import { Game } from './core/Game.js';
 import { installDebug } from './debug/Debug.js';
+import { QUALITY_OPTIONS } from './core/Quality.js';
 
 const params = new URLSearchParams(window.location.search);
 const num = (k) => (params.has(k) ? Number(params.get(k)) || 0 : 0);
@@ -10,7 +11,7 @@ const flags = {
   autostart: params.has('autostart'),
   level: Math.max(0, Math.min(60, num('level'))),
   seed: num('seed'),
-  quality: ['low', 'medium', 'high'].includes(params.get('quality')) ? params.get('quality') : null,
+  quality: QUALITY_OPTIONS.includes(params.get('quality')) ? params.get('quality') : null,
   time: ['day', 'dusk', 'night'].includes(params.get('time')) ? params.get('time') : null,
   mute: params.has('mute'),
   norender: params.has('norender'),
