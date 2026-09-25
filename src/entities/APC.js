@@ -103,7 +103,7 @@ export class APC extends GroundVehicle {
     const want = this.faceAngleTo(0, 0);
     this.mgYaw += clamp(wrapAngle(want - this.mgYaw), -1.5 * dt, 1.5 * dt);
     this.model.mg.rotation.y = this.mgYaw;
-    this.model.ramp.rotation.x = this.ramp * 1.35;
+    this.model.setRampOpen(this.ramp);
     if (this.loop) this.loop.setVolume(0.4 + Math.min(1, Math.abs(this.speed) / 4) * 0.6);
     this.smoke(dt, _v.set(0, 2, 0));
   }

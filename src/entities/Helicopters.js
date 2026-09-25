@@ -260,6 +260,11 @@ export class CH53 extends Helicopter {
       case 'ingress': {
         const d = this.moveTo(this.drop.x, this.drop.y, this.drop.z, dt, 48, 260);
         if (d < 25) this.setState('drop');
+        if (d < 400) {
+          this.hatch = Math.min(1, (this.hatch || 0) + dt * 0.4);
+          this.model.setRampOpen(this.hatch);
+          this.model.setDoorOpen(this.hatch);
+        }
         break;
       }
       case 'drop': {
@@ -271,7 +276,7 @@ export class CH53 extends Helicopter {
         if (this.dropTimer <= 0 && this.troops > 0) {
           this.dropTimer = 0.9;
           this.troops--;
-          _v.set(rng.range(-0.5, 0.5), -1.5, -7).applyMatrix4(this.root.matrixWorld);
+          _v.set(rng.range(-0.6, 0.6), -2.2, -9).applyMatrix4(this.root.matrixWorld);
           this.game.infantry.spawnParatrooper(_v.x, _v.y, _v.z);
         }
         if (this.troops <= 0 && this.dropTimer <= 0) {
@@ -284,6 +289,8 @@ export class CH53 extends Helicopter {
         break;
       }
       case 'leave':
+        this.hatch = Math.max(0, (this.hatch || 0) - dt * 0.3);
+        this.model.setRampOpen(this.hatch);
         this.moveTo(this.exit.x, this.exit.y, this.exit.z, dt, 55, 50);
         if (Math.hypot(this.pos.x, this.pos.z) > 1900) this.withdraw();
         break;

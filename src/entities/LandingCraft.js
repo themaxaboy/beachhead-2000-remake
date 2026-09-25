@@ -148,7 +148,7 @@ export class LandingCraft extends Entity {
     this.pitch += (wantPitch - this.pitch) * Math.min(1, dt * 2);
     this.roll = roll;
     this.pos.y = this.state === 'unload' || this.state === 'ramp' ? floatY * 0.3 : floatY;
-    this.model.ramp.rotation.x = this.ramp * 1.2;
+    this.model.ramp.rotation.x = this.ramp * 1.85; // tip rests on the sand
     this.smoke(dt, _v.set(0, 3, -8));
     // keep a carried vehicle glued to the deck (it updates before us in the entity list)
     if (this.vehicle && this.vehicle.state === 'cargo') {

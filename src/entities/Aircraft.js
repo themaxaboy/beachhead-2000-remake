@@ -306,6 +306,11 @@ export class SupplyPlane extends Aircraft {
     const fx = Math.sin(this.yaw);
     const fz = Math.cos(this.yaw);
     const along = -(this.pos.x * fx + this.pos.z * fz);
+    // open the cargo ramp for the air drop
+    const wantRamp = along < 900 && this.crates.length ? 1 : 0;
+    this.rampT = (this.rampT || 0) + Math.sign(wantRamp - (this.rampT || 0)) * dt * 0.3;
+    this.rampT = Math.min(1, Math.max(0, this.rampT));
+    this.model.setRampOpen(this.rampT);
     if (this.crates.length && along < -this.dropAt) {
       this.dropTimer -= dt;
       if (this.dropTimer <= 0) {

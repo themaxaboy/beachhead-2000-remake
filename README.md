@@ -8,6 +8,12 @@ modern real-time rendering: HDRI skies, a reflective ocean, PBR materials, shado
 > Vehicles, aircraft, soldiers, effects and every sound are generated procedurally. Environment textures and HDRIs
 > come from [Poly Haven](https://polyhaven.com) (CC0). See [`public/assets/CREDITS.md`](public/assets/CREDITS.md).
 
+| Day | Dusk |
+| --- | --- |
+| ![Landing craft unloading tanks on a sunny beach](docs/screenshot-day.jpg) | ![Burning landing craft at sunset](docs/screenshot-dusk.jpg) |
+| **Night** | **Main menu** |
+| ![Moonlit beach defence at night](docs/screenshot-night.jpg) | ![Title screen over the beach](docs/screenshot-menu.jpg) |
+
 ## How to play
 
 You are the lone gunner in a rotating turret on the beach. Destroy every landing craft, tank, APC, helicopter

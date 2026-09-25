@@ -301,6 +301,7 @@ export class Game {
     this.audio?.resume();
     this.clearBattlefield();
     this.hud.show(false);
+    this.hud.clear();
     this.state = 'menu';
     this.menus.show('main');
   }
