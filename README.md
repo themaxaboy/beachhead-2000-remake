@@ -129,6 +129,15 @@ verifies checksums and regenerates `CREDITS.md`.
 Before the first deploy, set **Settings → Pages → Source** to **GitHub Actions**. The build uses a relative
 base path, so it works under `https://<user>.github.io/beachhead-2000-remake/`.
 
+### Preview builds
+
+Push a branch named `preview/<name>` to publish it at `https://<user>.github.io/beachhead-2000-remake/preview/`
+without replacing production. A Pages site holds only one deployment, so `.github/workflows/preview.yml` rebuilds
+`main` unchanged at the site root and ships the preview branch under `/preview/` in the same artifact. The next
+deploy from `main` drops the preview; push to the preview branch again to restore it.
+
+One-time setup: **Settings → Environments → github-pages → Deployment branches and tags**, add `preview/*`.
+
 ## Project layout
 
 ```
