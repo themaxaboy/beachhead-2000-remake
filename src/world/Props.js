@@ -143,33 +143,51 @@ export class Props {
   }
 
   buildScatter(assets, rng) {
-    const addClones = (src, count, place) => {
+    // One InstancedMesh per sub-mesh of each glTF prop (a single draw call per pass).
+    const addClones = (src, count, place, instancedMode = true) => {
       if (!src) return;
-      src.traverse((o) => {
-        if (o.isMesh) {
-          o.castShadow = true;
-          o.receiveShadow = true;
-        }
-      });
+      const transforms = [];
       for (let i = 0; i < count; i++) {
         const t = place(i);
         if (!t) continue;
-        const c = src.clone();
-        c.position.set(t.x, heightAt(t.x, t.z) - (t.sink || 0), t.z);
-        c.rotation.set(t.rx || 0, t.yaw || 0, t.rz || 0);
-        c.scale.setScalar(t.scale || 1);
-        this.group.add(c);
+        _e.set(t.rx || 0, t.yaw || 0, t.rz || 0);
+        transforms.push(
+          new THREE.Matrix4().compose(
+            new THREE.Vector3(t.x, heightAt(t.x, t.z) - (t.sink || 0), t.z),
+            new THREE.Quaternion().setFromEuler(_e),
+            new THREE.Vector3().setScalar(t.scale || 1),
+          ),
+        );
         if (t.r) this.obstacles.push({ x: t.x, z: t.z, r: t.r });
       }
+      src.updateMatrixWorld(true);
+      if (!instancedMode) {
+        // big, high-poly props: separate objects so each one is frustum culled
+        for (const m of transforms) {
+          const c = src.clone();
+          c.matrixAutoUpdate = false;
+          c.matrix.copy(m);
+          c.traverse((o) => {
+            if (o.isMesh) o.castShadow = o.receiveShadow = true;
+          });
+          this.group.add(c);
+        }
+        return;
+      }
+      src.traverse((o) => {
+        if (!o.isMesh) return;
+        const local = o.matrixWorld;
+        this.group.add(instanced(o.geometry, o.material, transforms.map((m) => m.clone().multiply(local))));
+      });
     };
 
-    addClones(assets.models.rock_07, 26, () => {
+    addClones(assets.models.rock_07, 16, () => {
       const side = rng.sign();
       const x = side * rng.range(120, 420);
       const z = shoreZ(x) + rng.range(-6, 70);
       const s = rng.range(2.5, 6);
       return { x, z, yaw: rng.range(0, 6.28), scale: s, sink: s * 0.2, r: s * 0.6 };
-    });
+    }, false);
     addClones(assets.models.barrel_03, 12, (i) => {
       const a = rng.range(-2.6, 2.6) + Math.PI;
       const r = rng.range(12, 26);

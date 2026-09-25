@@ -18,6 +18,10 @@ export class World {
     this.props = new Props(assets, game.mats, q);
     scene.add(this.props.group);
     this.obstacles = this.props.obstacles;
+    // Layer 1 = visible to the main and shadow cameras but skipped by the water reflection
+    // (from the bunker the sea never reflects the beach, so rendering it twice is wasted work).
+    this.terrain.mesh.layers.set(1);
+    this.sky.sun.shadow.camera.layers.enable(1);
     this.focus = new THREE.Vector3();
   }
 
@@ -32,6 +36,7 @@ export class World {
     this.ocean.setMode(q.water);
     this.sky.setShadowSize(q.shadows);
     this.props.setGrass(q.grass);
+    this.props.group.traverse((o) => o.layers.set(1));
   }
 
   update(dt, camera) {

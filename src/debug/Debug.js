@@ -12,6 +12,8 @@ export function installDebug(game) {
       return !!game.ready;
     },
     async start(n = 1, practice = true) {
+      game.bunker.invulnerable = false;
+      game.bot = null;
       await game.startCampaign(n, practice);
       game.beginLevel();
       game.enterPlaying();

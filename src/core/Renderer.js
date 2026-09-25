@@ -58,6 +58,7 @@ export class Renderer {
     r.toneMappingExposure = 1;
     r.shadowMap.enabled = true;
     r.shadowMap.type = THREE.PCFShadowMap;
+    r.info.autoReset = false; // count every pass of a frame (reset in render())
     this.renderer = r;
 
     this.scene = new THREE.Scene();
@@ -127,6 +128,7 @@ export class Renderer {
   }
 
   render(dt) {
+    this.renderer.info.reset();
     this.damagePass.uniforms.uTime.value += dt;
     this.composer.render(dt);
   }

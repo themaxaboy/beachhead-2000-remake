@@ -90,6 +90,7 @@ export class Game {
 
     await this.world.setTimeOfDay(this.level.def.timeOfDay);
     this.applyQuality();
+    window.addEventListener('resize', () => this.effects.setScale(this.renderer.height * this.renderer.pixelRatio, this.camera.fov));
     this.menus.show('loading', { progress: 0.95, text: 'PREPARING SHADERS' });
     try {
       await this.renderer.renderer.compileAsync(this.scene, this.camera);
@@ -294,6 +295,7 @@ export class Game {
   }
 
   quitToMenu() {
+    this.renderer.damage.uFade.value = 0;
     this.input.enabled = false;
     this.input.exitLock();
     this.audio?.resume();
@@ -355,6 +357,7 @@ export class Game {
 
   showGameOver() {
     this.state = 'gameover';
+    this.renderer.damage.uFade.value = 0.55;
     this.input.exitLock();
     this.hud.show(false);
     this.menus.show('gameover', { score: this.score, level: this.level.def.number, practice: this.practice });

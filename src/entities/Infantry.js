@@ -70,6 +70,7 @@ export class InfantrySystem {
       mesh.castShadow = true;
       mesh.receiveShadow = false;
       mesh.frustumCulled = false;
+      mesh.layers.set(1); // not needed in the water reflection
       game.scene.add(mesh);
       return { name: p.name, mesh, pivot: p.pivot.clone() };
     });
