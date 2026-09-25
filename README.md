@@ -2,7 +2,8 @@
 
 An unofficial, non-commercial fan remake of **Beach Head 2000** (Digital Fusion, 2000) that runs in the browser.
 The gameplay, rules and screen layout follow the original as closely as possible. The graphics are rebuilt with
-modern real-time rendering: HDRI skies, a reflective ocean, PBR materials, shadows, bloom and GPU particles.
+modern real-time rendering: HDRI skies, a physically based sea with breaking surf, height haze, PBR materials,
+shadows, bloom and GPU particles. Five quality settings keep it playable on old integrated graphics.
 
 > Built with [three.js](https://threejs.org) and [Vite](https://vite.dev). No original game assets are used.
 > Vehicles, aircraft, soldiers, effects and every sound are generated procedurally. Environment textures and HDRIs
@@ -67,15 +68,55 @@ Useful URL flags for development:
 | --- | --- |
 | `?debug` | FPS / draw-call counter and cheat keys: K kill all, I invulnerable, F refill ammo |
 | `?autostart&level=12` | Jump straight into a mission |
-| `?quality=low\|medium\|high` | Override the graphics preset |
+| `?quality=auto\|low\|medium\|high\|ultra` | Override the graphics preset |
 | `?time=day\|dusk\|night` | Override the time of day |
 | `?seed=1` | Deterministic spawns |
 | `?nolock` | Drag to aim instead of pointer lock (automation) |
 | `?mute` | No audio |
 
 `window.__bh` exposes a small automation API: `start(n)`, `advance(sec)`, `aim(yaw, pitch)`, `fire(sec)`,
-`killAll()`, `stats()` and more (see `src/debug/Debug.js`). `npm run smoke` drives the game in headless Chromium
+`killAll()`, `stats()`, `bench(frames)` and more (see `src/debug/Debug.js`). `npm run smoke` drives the game in headless Chromium
 with Playwright and saves screenshots to `artifacts/`.
+
+### Graphics quality
+
+**Options → Graphics quality** offers Auto, Low, Medium, High and Ultra.
+
+- **Auto** (the default) picks a tier from the GPU name. Old Intel HD/UHD graphics get Low, Iris Xe / Radeon
+  integrated / Apple M1 get Medium, and discrete GPUs get High. Auto never picks Ultra.
+- While playing, Auto lowers the render resolution when frames get slow and raises it again when there is
+  headroom (down to `dynResMin`).
+- If the game is still too slow at the lowest resolution, Auto drops one tier at the next mission briefing, never
+  in the middle of a fight. The choice is remembered for that GPU.
+- With `?debug` or **Show FPS**, the counter shows the tier and the current resolution scale.
+
+| | Low | Medium | High | Ultra |
+| --- | --- | --- | --- | --- |
+| Resolution scale | 0.75 (Auto: 0.5–0.75) | 1.0 | 1.25 | 2.0 |
+| Post-processing | none: renders straight to the screen | bloom, grade, MSAA 2× | + MSAA 4×, sun shafts | same |
+| Shadows | off | 1024 | 2048 | 4096 |
+| Sea | 4 waves, sky reflection | 6 waves, planar reflection 256, boat wakes | 8 waves, reflection 512 | 8 waves + fine ripples, reflection 1024 |
+| Terrain grid / explosion lights | 192 / 1 | 256 / 2 | 320 / 4 | 400 / 4 |
+
+All presets live in `CONFIG.quality` (`src/config.js`).
+
+### Sea and shore rendering
+
+The water model is adapted to WebGL from [dgreenheck/tidewater](https://github.com/dgreenheck/tidewater) (MIT).
+Only the parts that are cheap in a single shader pass are used. Because the camera never leaves the bunker, the
+seabed is known analytically and no screen-space refraction or reflection passes are needed.
+
+- **Waves.** A Gerstner swell (`src/world/waves.js`) fades out in shallow water, long waves first. The landing
+  craft float on the same waves, computed on the CPU.
+- **Surf.** `src/world/ShoreField.js` bakes the depth and the wave travel time to the shore. Analytic breakers
+  (`src/world/shaders/shore.glsl.js`) shoal, break and run up the sand. The beach shader uses the same model, so
+  sand darkens under each swash and dries afterwards.
+- **Water shading.** Exact Fresnel; sky reflection whose roughness grows with distance (Cox-Munk); a GGX sun
+  glint; light absorbed and scattered along a refracted ray down to the sandy bottom; bright wave crests where the
+  sun shines through them; lace foam from whitecaps, surf and boat wakes; wind gusts and glassy slicks across the
+  open sea.
+- **Haze.** Two-layer height haze tinted towards the sun replaces three's exponential fog for every material
+  (`src/world/shaders/haze.glsl.js`).
 
 ### Assets
 
@@ -92,8 +133,9 @@ base path, so it works under `https://<user>.github.io/beachhead-2000-remake/`.
 
 ```
 src/
-  core/       game loop & state machine, renderer + post-processing, input, collision, assets
-  world/      terrain (analytic height field), HDRI sky presets, ocean, scenery, bunker
+  core/       game loop & state machine, renderer + post-processing, quality tiers, input, collision, assets
+  world/      terrain (analytic height field), HDRI sky presets, ocean + shore field, scenery, bunker
+  world/shaders/  shared GLSL: surf/swash model and height haze
   entities/   infantry (instanced), landing craft, tanks, APCs, helicopters, jets, bombers, supply plane, crates
   entities/models/  procedural vehicle / weapon models and shared PBR materials
   weapons/    weapon system, projectiles, first-person view models
@@ -105,6 +147,9 @@ src/
 ```
 
 ## Legal
+
+Sea, surf and haze techniques are adapted from [tidewater](https://github.com/dgreenheck/tidewater),
+© 2026 DRG Software Solutions LLC, MIT License.
 
 Beach Head is a trademark of its respective owners. This project is a non-commercial tribute. It is not
 affiliated with or endorsed by Digital Fusion Inc. and does not contain any of the original game's code or assets.

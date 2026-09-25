@@ -18,7 +18,7 @@ export class World {
     this.shore = createShore();
     this.ocean = new Ocean(assets, scene, q.water);
     this.ocean.attachShore(this.shore);
-    this.terrain.attachShore?.(this.shore);
+    this.terrain.attachShore(this.shore);
     this.props = new Props(assets, game.mats, q);
     scene.add(this.props.group);
     this.obstacles = this.props.obstacles;

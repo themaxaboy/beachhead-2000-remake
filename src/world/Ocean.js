@@ -412,9 +412,7 @@ export class Ocean {
 
   /** Shore uniforms shared with the terrain (see World). */
   attachShore(shore) {
-    this.shore = shore;
     Object.assign(this.uniforms, shore.uniforms);
-    if (this.mat) this.buildMaterials();
   }
 
   setMode(water) {
@@ -483,6 +481,7 @@ export class Ocean {
       target,
       camera: new THREE.PerspectiveCamera(),
       plane: new THREE.Plane(new THREE.Vector3(0, 1, 0), 0),
+      viewPlane: new THREE.Plane(),
       clip: new THREE.Vector4(),
       q: new THREE.Vector4(),
       view: new THREE.Vector3(),
@@ -505,7 +504,8 @@ export class Ocean {
   /** Mirror-camera render of layer 0 (boats, vehicles, aircraft) for the high tiers; after three's Water.js. */
   renderReflection(renderer, scene, camera) {
     const r = this.reflection;
-    if (!r || this.inReflection) return;
+    // Called once per material group; render the mirror only once per frame.
+    if (!r || this.inReflection || renderer.info.render.frame === this.reflFrame) return;
     const cam = r.camera;
     const normal = r.plane.normal;
     r.view.setFromMatrixPosition(camera.matrixWorld);
@@ -525,7 +525,7 @@ export class Ocean {
     tm.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
     tm.multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
     // Oblique near plane at the water surface (Lengyel).
-    const plane = new THREE.Plane().copy(r.plane).applyMatrix4(cam.matrixWorldInverse);
+    const plane = r.viewPlane.copy(r.plane).applyMatrix4(cam.matrixWorldInverse);
     r.clip.set(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
     const p = cam.projectionMatrix.elements;
     r.q.set((Math.sign(r.clip.x) + p[8]) / p[0], (Math.sign(r.clip.y) + p[9]) / p[5], -1, (1 + p[10]) / p[14]);
@@ -553,6 +553,7 @@ export class Ocean {
     scene.background = prevBg;
     this.mesh.visible = this.skirt.visible = true;
     this.inReflection = false;
+    this.reflFrame = renderer.info.render.frame;
     renderer.setRenderTarget(prevTarget);
     const vp = camera.viewport;
     if (vp !== undefined) renderer.state.viewport(vp);
