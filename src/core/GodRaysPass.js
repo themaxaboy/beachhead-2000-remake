@@ -10,7 +10,7 @@ const MASK = {
     tDiffuse: { value: null },
     uSun: { value: new THREE.Vector2(0.5, 0.5) },
     uAspect: { value: 1 },
-    uThreshold: { value: 1.2 },
+    uThreshold: { value: 2.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -25,8 +25,9 @@ const MASK = {
       vec3 c = texture2D(tDiffuse, vUv).rgb;
       float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
       vec2 d = (vUv - uSun) * vec2(uAspect, 1.0);
-      float fall = 1.0 - smoothstep(0.0, 0.75, length(d));
-      gl_FragColor = vec4(c * smoothstep(uThreshold, uThreshold * 2.5, l) * fall * fall, 1.0);
+      // Only the sun and the sky right around it seed rays; anything darker in front of it casts a shaft.
+      float fall = pow(max(0.0, 1.0 - length(d) / 0.28), 3.0);
+      gl_FragColor = vec4(c / max(l, 1e-3) * smoothstep(uThreshold, uThreshold * 3.0, l) * fall, 1.0);
     }
   `,
 };

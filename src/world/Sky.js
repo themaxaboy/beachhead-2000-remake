@@ -22,6 +22,9 @@ function analyzeHDR(tex) {
   const lums = [];
   const horizon = new THREE.Color(0, 0, 0);
   let hn = 0;
+  // Cosine-weighted upper hemisphere (sun disc clamped): ambient light for the water volume and foam.
+  const skyRad = new THREE.Color(0, 0, 0);
+  let skyW = 0;
   for (let r = 0; r < H; r++) {
     const v = 1 - (r + 0.5) / H;
     const el = (v - 0.5) * Math.PI;
@@ -33,6 +36,13 @@ function analyzeHDR(tex) {
       const phi = ((c + 0.5) / W - 0.5) * Math.PI * 2;
       if (el > 0.09 && el < 1.0 && (c & 3) === 0) {
         lums.push(Math.min(48, R) * 0.2126 + Math.min(48, G) * 0.7152 + Math.min(48, B) * 0.0722);
+      }
+      if (el > 0 && (c & 1) === 0) {
+        const w = Math.sin(el) * Math.cos(el);
+        skyRad.r += Math.min(48, R) * w;
+        skyRad.g += Math.min(48, G) * w;
+        skyRad.b += Math.min(48, B) * w;
+        skyW += w;
       }
       if (el > 0.0 && el < 0.06) {
         horizon.r += R;
@@ -66,7 +76,8 @@ function analyzeHDR(tex) {
   horizon.setRGB(horizon.r / hn, horizon.g / hn, horizon.b / hn);
   lums.sort((x, y) => x - y);
   const median = lums[lums.length >> 1] || 1;
-  const result = { dir, sunColor: sunCol, horizon, maxLum, median };
+  skyRad.multiplyScalar(1 / (skyW || 1));
+  const result = { dir, sunColor: sunCol, horizon, skyRad, maxLum, median };
   analysisCache.set(tex, result);
   return result;
 }
@@ -149,6 +160,8 @@ export class Sky {
     this.fog.color.copy(a.horizon).multiplyScalar(skyScale);
     this.fog.density = preset.fogDensity;
     this.horizonColor = a.horizon.clone();
+    this.horizonRad = a.horizon.clone().multiplyScalar(skyScale);
+    this.skyRad = a.skyRad.clone().multiplyScalar(this.scene.environmentIntensity);
     this.renderer.toneMappingExposure = preset.exposure;
     return preset;
   }

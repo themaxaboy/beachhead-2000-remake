@@ -3,6 +3,7 @@ import { Terrain } from './Terrain.js';
 import { Ocean } from './Ocean.js';
 import { Sky } from './Sky.js';
 import { Props } from './Props.js';
+import { createShore } from './ShoreField.js';
 import { CONFIG } from '../config.js';
 
 /** Assembles the static environment: sky, sea, beach and scenery. */
@@ -14,7 +15,10 @@ export class World {
     const q = renderer.quality;
     this.terrain = new Terrain(assets, q.terrainSeg);
     scene.add(this.terrain.mesh);
+    this.shore = createShore();
     this.ocean = new Ocean(assets, scene, q.water);
+    this.ocean.attachShore(this.shore);
+    this.terrain.attachShore?.(this.shore);
     this.props = new Props(assets, game.mats, q);
     scene.add(this.props.group);
     this.obstacles = this.props.obstacles;
@@ -27,7 +31,11 @@ export class World {
 
   async setTimeOfDay(name) {
     const preset = await this.sky.apply(name);
-    this.ocean.applySky(this.sky.sunDir, this.sky.sun.color, preset.water, preset.sunIntensity);
+    this.ocean.applySky(this.sky, preset);
+    const r = this.game.renderer;
+    const g = preset.grade || [1, 1, 0];
+    r.grade.set(g[0], g[1], g[2], 0);
+    r.setSun(this.sky.sunDir, this.sky.sun.color, preset.godRays ?? 0);
     this.timeOfDay = name;
     return preset;
   }
@@ -41,8 +49,10 @@ export class World {
   }
 
   update(dt, camera) {
+    this.shore.update(dt);
     this.terrain.update(dt);
     this.ocean.update(dt);
+    this.ocean.setWakes(this.game.entities?.list || []);
     this.props.update(dt);
     // Shadow frustum follows the aim point.
     camera.getWorldDirection(this.focus);

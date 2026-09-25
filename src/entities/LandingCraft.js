@@ -8,6 +8,7 @@ import { Tank } from './Tank.js';
 import { APC } from './APC.js';
 
 const _v = new THREE.Vector3();
+const _w = { y: 0, dx: 0, dz: 0 };
 const SLOT_X = [-1.5, 0, 1.5];
 const SLOT_Z = [-4.2, -1.4, 1.4, 4.2];
 
@@ -62,12 +63,35 @@ export class LandingCraft extends Entity {
     return out.set(this.pos.x + Math.sin(this.yaw) * ahead, 0, this.pos.z + Math.cos(this.yaw) * ahead);
   }
 
+  /** Rides the same waves the ocean shader draws: height, pitch and roll from four hull points. */
+  floatOnSea() {
+    const ocean = this.game.world.ocean;
+    const fx = Math.sin(this.yaw);
+    const fz = Math.cos(this.yaw);
+    const L = 8;
+    const W = 3;
+    const { x, z } = this.pos;
+    const bow = ocean.sample(x + fx * L, z + fz * L, _w).y;
+    const stern = ocean.sample(x - fx * L, z - fz * L, _w).y;
+    const right = ocean.sample(x + fz * W, z - fx * W, _w).y;
+    const left = ocean.sample(x - fz * W, z + fx * W, _w).y;
+    const bowUp = Math.atan2(bow - stern, 2 * L);
+    return {
+      y: (bow + stern + right + left) * 0.25,
+      // Entity pitch is about world X (see Entity.sync), so project the bow elevation onto it.
+      pitch: -bowUp * fz * 0.8,
+      roll: Math.atan2(right - left, 2 * W) * 0.8,
+    };
+  }
+
   update(dt) {
     super.update(dt);
     this.bob += dt;
-    let wantPitch = Math.sin(this.bob * 0.9) * 0.02;
-    let roll = Math.sin(this.bob * 0.7) * 0.03;
-    let floatY = Math.sin(this.bob * 1.1) * 0.12;
+    this.wakeSpeed = 0;
+    const sea = this.floatOnSea();
+    let wantPitch = sea.pitch;
+    let roll = sea.roll;
+    let floatY = sea.y;
 
     if (!this.alive) {
       // sinking
@@ -145,9 +169,10 @@ export class LandingCraft extends Entity {
         break;
       }
     }
-    this.pitch += (wantPitch - this.pitch) * Math.min(1, dt * 2);
-    this.roll = roll;
-    this.pos.y = this.state === 'unload' || this.state === 'ramp' ? floatY * 0.3 : floatY;
+    const beached = this.state === 'unload' || this.state === 'ramp';
+    this.pitch += ((beached ? wantPitch * 0.3 : wantPitch) - this.pitch) * Math.min(1, dt * 2);
+    this.roll += ((beached ? roll * 0.3 : roll) - this.roll) * Math.min(1, dt * 3);
+    this.pos.y = beached ? floatY * 0.3 : floatY;
     this.model.ramp.rotation.x = this.ramp * 1.85; // tip rests on the sand
     this.smoke(dt, _v.set(0, 3, -8));
     // keep a carried vehicle glued to the deck (it updates before us in the entity list)
@@ -159,6 +184,7 @@ export class LandingCraft extends Entity {
   }
 
   forward(dt, speed) {
+    this.wakeSpeed = Math.abs(speed);
     this.vel.set(Math.sin(this.yaw) * speed, 0, Math.cos(this.yaw) * speed);
     this.pos.x += this.vel.x * dt;
     this.pos.z += this.vel.z * dt;

@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
 import { fbm2, smoothstep, lerp } from '../core/math.js';
+import { SHORE_GLSL } from './shaders/shore.glsl.js';
+import { makeFoamTexture } from '../fx/TextureFactory.js';
 
 const WATERLINE = CONFIG.world.waterlineZ;
 
@@ -86,6 +88,7 @@ export class Terrain {
     this.uniforms = {
       wetMap: { value: wet.map },
       wetNormal: { value: wet.normalMap },
+      uFoamMap: { value: makeFoamTexture(256) },
       uTime: { value: 0 },
     };
     mat.onBeforeCompile = (shader) => {
@@ -104,7 +107,9 @@ export class Terrain {
           varying vec3 vBhWorld;
           uniform sampler2D wetMap;
           uniform sampler2D wetNormal;
-          uniform float uTime;`,
+          uniform sampler2D uFoamMap;
+          uniform float uTime;
+          ${SHORE_GLSL}`,
         )
         .replace(
           '#include <map_fragment>',
@@ -115,26 +120,52 @@ export class Terrain {
           float bhN = texture2D(map, vBhWorld.xz / 97.0).g - 0.5;
           vec4 bhDry = mix(texture2D(map, bhUv), texture2D(map, bhUv2), 0.45);
           bhDry.rgb *= 1.0 + bhN * 0.35;
-          vec4 bhWet = texture2D(wetMap, bhUv * 0.8) * vec4(0.74, 0.7, 0.66, 1.0);
-          float wetK = 1.0 - smoothstep(0.35, 1.5, bhH + bhN * 0.8);
-          vec4 bhCol = mix(bhDry, bhWet, wetK);
-          bhCol.rgb *= mix(1.0, 0.45, smoothstep(0.0, -2.5, bhH));
-          float foamLine = 0.18 + 0.16 * sin(uTime * 0.55 + vBhWorld.x * 0.013 + sin(vBhWorld.x * 0.05) * 0.8);
-          float foam = smoothstep(0.22, 0.0, abs(bhH - foamLine)) * smoothstep(-0.2, 0.25, bhN + 0.1);
-          bhCol.rgb = mix(bhCol.rgb, vec3(0.92, 0.93, 0.9), foam * 0.55);
+          vec4 bhWetTex = texture2D(wetMap, bhUv * 0.8);
+          // Swash from the shared shore model: the water sheet running up the sand, and sand that stays
+          // dark and glossy after each wave and then dries (after dgreenheck/tidewater, MIT).
+          vec4 bhSw = bhH < 1.2 ? bhSwash(vBhWorld.x, bhH) : vec4(-1e3, 0.0, 0.0, 0.0);
+          float bhMottle = smoothstep(0.25, 0.75, bhWetTex.g + bhN * 0.9);
+          float bhDamp = smoothstep(1.5, 0.35, bhH + bhN * 0.5) * mix(0.25, 0.55, bhMottle);
+          float wetK = max(max(bhSw.z, bhDamp), smoothstep(0.05, -0.15, bhH));
+          float bhDryEdge = smoothstep(0.0, 0.6, bhSw.z) * smoothstep(1.0, 0.6, bhSw.z);
+          wetK *= 1.0 - bhDryEdge * bhMottle * 0.5;
+          vec3 bhWetCol = mix(bhDry.rgb, bhWetTex.rgb * vec3(0.8, 0.76, 0.72), 0.6) * 0.62;
+          float bhWetLum = dot(bhWetCol, vec3(0.2126, 0.7152, 0.0722));
+          bhWetCol = mix(vec3(bhWetLum), bhWetCol, 1.15) * vec3(0.97, 0.98, 1.0);
+          vec3 bhRgb = mix(bhDry.rgb, bhWetCol, wetK);
+          // Faint lines of grit left by earlier swash, anti-aliased with fwidth.
+          float bhSl = (bhH + bhN * 0.03) / 0.065;
+          float bhSlW = fwidth(bhSl) + 1e-4;
+          float bhLine = smoothstep(bhSlW * 1.5 + 0.05, 0.0, abs(fract(bhSl) - 0.5)) * smoothstep(0.03, 0.1, bhH) * smoothstep(0.9, 0.5, bhH);
+          bhRgb *= 1.0 - bhLine * 0.14 * (1.0 - bhSw.w);
+          // Seabed: light absorbed by the water column (matches the ocean's colour at its thin edge).
+          bhRgb *= exp(-vec3(0.42, 0.075, 0.035) * max(-bhH, 0.0) * 2.2);
+          // The swash sheet: thin, slightly blue water with lace foam behind its leading edge.
+          float bhSheet = bhSw.w;
+          bhRgb = mix(bhRgb, bhRgb * vec3(0.78, 0.85, 0.88), bhSheet * 0.7);
+          float bhFoamCov = smoothstep(0.0, 0.5, bhSw.x) * smoothstep(3.5, 0.8, bhSw.x) * mix(0.5, 1.0, bhSw.y);
+          float bhLace = texture2D(uFoamMap, vBhWorld.xz * 0.21 + vec2(uTime * 0.004, 0.0)).r;
+          float bhThr = 1.05 - bhFoamCov * 1.1;
+          float bhFoam = smoothstep(bhThr - 0.08, bhThr + 0.08, bhLace) * bhFoamCov;
+          bhRgb = mix(bhRgb, vec3(0.9, 0.92, 0.9), bhFoam * 0.9);
+          // Contact darkening just ahead of the rushing water.
+          bhRgb *= 1.0 - smoothstep(-0.9, -0.05, bhSw.x) * step(bhSw.x, 0.0) * bhSw.y * 0.2;
+          vec4 bhCol = vec4(bhRgb, 1.0);
           diffuseColor *= bhCol;
           `,
         )
         .replace(
           '#include <roughnessmap_fragment>',
-          'float roughnessFactor = roughness * mix(1.0, 0.38, wetK);',
+          `float roughnessFactor = mix(roughness, mix(0.42, 0.16, bhSw.z), wetK);
+          roughnessFactor = mix(roughnessFactor, 0.05, bhSheet * (1.0 - bhFoam));
+          roughnessFactor = mix(roughnessFactor, 0.85, bhFoam);`,
         )
         .replace('#include <normal_fragment_begin>', normalBegin)
         .replace(
           '#include <normal_fragment_maps>',
           `
           vec3 mapN = mix(texture2D(normalMap, bhUv).xyz, texture2D(wetNormal, bhUv * 0.8).xyz, wetK) * 2.0 - 1.0;
-          mapN.xy *= normalScale;
+          mapN.xy *= normalScale * (1.0 - wetK * 0.6) * (1.0 - bhSheet * 0.8);
           normal = normalize(tbn * mapN);
           `,
         );
@@ -144,6 +175,11 @@ export class Terrain {
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.receiveShadow = true;
     this.mesh.name = 'terrain';
+  }
+
+  /** Shared shore uniforms (see ShoreField.createShore); must be attached before the first render. */
+  attachShore(shore) {
+    Object.assign(this.uniforms, shore.uniforms);
   }
 
   setSegments(seg) {

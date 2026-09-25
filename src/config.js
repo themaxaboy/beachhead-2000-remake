@@ -82,10 +82,12 @@ export const CONFIG = {
     },
   },
 
+  // grade = [saturation, contrast, warmth] (composer tiers), godRays = sun-shaft strength (High/Ultra),
+  // whitecaps = open-sea foam amount.
   timeOfDay: {
-    day: { hdri: 'day_2k.hdr', exposure: 0.95, skyMedian: 0.32, sunAzimuth: 145 * DEG, sunIntensity: 3.2, fogDensity: 0.00045, water: 0x1d5f70, minElevation: 28 * DEG, hemi: 0.35 },
-    dusk: { hdri: 'dusk_2k.hdr', exposure: 1.0, skyMedian: 0.2, sunColor: 0xffb070, sunAzimuth: -28 * DEG, sunIntensity: 2.2, fogDensity: 0.0007, water: 0x223344, minElevation: 7 * DEG, hemi: 0.3 },
-    night: { hdri: 'night_1k.hdr', exposure: 1.15, skyMedian: 0.022, envBoost: 1.6, elevation: 32 * DEG, sunColor: 0x9fb6ff, sunAzimuth: 22 * DEG, sunIntensity: 0.45, fogDensity: 0.0009, water: 0x0b1a26, minElevation: 16 * DEG, hemi: 0.1, flares: true },
+    day: { hdri: 'day_2k.hdr', exposure: 0.95, skyMedian: 0.32, sunAzimuth: 145 * DEG, sunIntensity: 3.2, fogDensity: 0.00045, water: 0x1d5f70, minElevation: 28 * DEG, hemi: 0.35, grade: [1.06, 1.04, 0.015], godRays: 0.35, whitecaps: 0.5 },
+    dusk: { hdri: 'dusk_2k.hdr', exposure: 1.0, skyMedian: 0.2, sunColor: 0xffb070, sunAzimuth: -28 * DEG, sunIntensity: 2.2, fogDensity: 0.0007, water: 0x223344, minElevation: 7 * DEG, hemi: 0.3, grade: [1.1, 1.05, 0.04], godRays: 0.9, whitecaps: 0.45 },
+    night: { hdri: 'night_1k.hdr', exposure: 1.15, skyMedian: 0.022, envBoost: 1.6, elevation: 32 * DEG, sunColor: 0x9fb6ff, sunAzimuth: 22 * DEG, sunIntensity: 0.45, fogDensity: 0.0009, water: 0x0b1a26, minElevation: 16 * DEG, hemi: 0.1, flares: true, grade: [0.95, 1.03, -0.03], godRays: 0, whitecaps: 0.4 },
   },
 };
 
