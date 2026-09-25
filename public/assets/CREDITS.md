@@ -7,7 +7,7 @@ All textures, HDRIs and models below come from [Poly Haven](https://polyhaven.co
 |---|---|---|---|
 | Kloofendal 48d Partly Cloudy (Pure Sky) | hdri | Greg Zaal, Jarod Guest | https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky |
 | Qwantani Dusk 2 (Pure Sky) | hdri | Greg Zaal, Jarod Guest | https://polyhaven.com/a/qwantani_dusk_2_puresky |
-| Qwantani Moonrise (Pure Sky) | hdri | Greg Zaal, Jarod Guest | https://polyhaven.com/a/qwantani_moonrise_puresky |
+| Qwantani Night (Pure Sky) | hdri | Greg Zaal, Jarod Guest | https://polyhaven.com/a/qwantani_night_puresky |
 | Coast Sand 01 | texture | Rob Tuytel | https://polyhaven.com/a/coast_sand_01 |
 | Damp Beach Sand | texture | Dimitrios Savva | https://polyhaven.com/a/damp_beach_sand |
 | Concrete | texture | Rob Tuytel | https://polyhaven.com/a/concrete |

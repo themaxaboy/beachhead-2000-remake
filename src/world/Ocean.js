@@ -42,11 +42,23 @@ export class Ocean {
         sunDirection: new THREE.Vector3(0.5, 0.5, 0),
         sunColor: 0xffffff,
         waterColor: 0x1b4a5a,
-        distortionScale: 3.2,
+        distortionScale: 5.5,
         fog: true,
         alpha: 1,
       });
-      this.mesh.material.uniforms.size.value = 1.6;
+      this.mesh.material.uniforms.size.value = 0.55;
+      // Less mirror-like at grazing angles, and keep some body colour so the sea reads as deep water.
+      const m = this.mesh.material;
+      m.fragmentShader = m.fragmentShader
+        .replace(
+          'float reflectance = rf0 + ( 1.0 - rf0 ) * pow( ( 1.0 - theta ), 5.0 );',
+          'float reflectance = min( 0.5, rf0 + ( 1.0 - rf0 ) * pow( ( 1.0 - theta ), 5.0 ) );',
+        )
+        .replace(
+          'vec3 scatter = max( 0.0, dot( surfaceNormal, eyeDirection ) ) * waterColor;',
+          'vec3 scatter = ( 0.45 + 0.55 * max( 0.0, dot( surfaceNormal, eyeDirection ) ) ) * waterColor;',
+        );
+      m.needsUpdate = true;
     }
     this.mesh.rotation.x = -Math.PI / 2;
     this.mesh.position.y = 0;
@@ -61,7 +73,7 @@ export class Ocean {
       const u = this.mesh.material.uniforms;
       u.sunDirection.value.copy(sunDir).normalize();
       u.sunColor.value.copy(sunColor).multiplyScalar(Math.min(1.6, intensity * 0.45));
-      u.waterColor.value.setHex(waterColor);
+      u.waterColor.value.setHex(waterColor).multiplyScalar(2.2);
     } else {
       this.mat.color.setHex(waterColor).multiplyScalar(1.1);
     }

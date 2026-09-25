@@ -5,7 +5,7 @@ export class Radar {
     this.ctx = canvas.getContext('2d');
     this.range = 1300;
     this.sweep = 0;
-    this.acc = 0;
+    this.acc = 1;
     this.resize();
   }
 

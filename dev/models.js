@@ -16,7 +16,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.9;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 document.body.appendChild(renderer.domElement);
@@ -94,11 +94,11 @@ function catalogue(mats) {
   add('f4', 'buildF4', () => M.buildF4(mats), [8, 8, -70], 0.6, ['bombs']);
   add('c130', 'buildCargoPlane', () => M.buildCargoPlane(mats), [45, 10, -80], 0.6, ['props', 'ramp']);
   add('b52', 'buildB52', () => M.buildB52(mats), [0, 14, -150], 0.5, []);
-  add('twinmg', 'buildViewTwinMG', () => M.buildViewTwinMG(mats), [-6, 1.2, 12], PI, ['barrelL', 'barrelR']);
-  add('atgun', 'buildViewATGun', () => M.buildViewATGun(mats), [-2.5, 1.2, 12], PI, ['barrel']);
-  add('missile', 'buildViewMissilePod', () => M.buildViewMissilePod(mats), [0.5, 1.2, 12], PI, ['tubeL', 'tubeR']);
-  add('pistol', 'buildViewPistol', () => M.buildViewPistol(mats), [2.5, 1.2, 12], PI, ['slide', 'magazine']);
-  add('howitzer', 'buildViewHowitzer', () => M.buildViewHowitzer(mats), [6, 1.2, 12], PI, ['barrel']);
+  add('twinmg', 'buildViewTwinMG', () => M.buildViewTwinMG(mats), [-6, 1.2, 18], PI, ['barrelL', 'barrelR']);
+  add('atgun', 'buildViewATGun', () => M.buildViewATGun(mats), [-2.5, 1.2, 18], PI, ['barrel']);
+  add('missile', 'buildViewMissilePod', () => M.buildViewMissilePod(mats), [0.5, 1.2, 18], PI, ['tubeL', 'tubeR']);
+  add('pistol', 'buildViewPistol', () => M.buildViewPistol(mats), [2.5, 1.2, 18], PI, ['slide', 'magazine']);
+  add('howitzer', 'buildViewHowitzer', () => M.buildViewHowitzer(mats), [6.5, 1.2, 18], PI, ['barrel']);
   return L;
 }
 const PI = Math.PI;
@@ -144,6 +144,10 @@ function applyPose(key, o) {
   if (key === 'f4') { o.bombs.visible = false; }
 }
 
+function applyWreck(o, mats) {
+  if (pose === 'wreck') M.applyCharred(o.root, mats);
+}
+
 function spin(key, o, t, dt) {
   if (!animate) return;
   if (o.mainRotor) o.mainRotor.rotation.y += dt * 30;
@@ -175,15 +179,22 @@ async function main() {
   scene.environment = pmrem.fromEquirectangular(hdr).texture;
   scene.environmentIntensity = 1.0;
 
-  const mats = M.createMaterials({ rustyMetal, greenMetalRust, concrete });
+  const mats = params.has('notex') ? M.createMaterials() : M.createMaterials({ rustyMetal, greenMetalRust, concrete });
   window.__mats = mats;
 
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), new THREE.MeshStandardMaterial({ color: 0xcdb58c, roughness: 0.95 }));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200), new THREE.MeshStandardMaterial({ color: 0xb09a76, roughness: 0.95 }));
   ground.rotation.x = -PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
 
   const cat = catalogue(mats);
+  if (!only) {
+    // small concrete plinth for the first-person viewmodels
+    const plinth = new THREE.Mesh(new THREE.BoxGeometry(17, 0.3, 4), mats.concrete);
+    plinth.position.set(0.3, 0.15, 18);
+    plinth.castShadow = plinth.receiveShadow = true;
+    scene.add(plinth);
+  }
   navEl.innerHTML = `<a href="?">lineup</a>` + cat.map((c) => `<a href="?m=${c.key}">${c.key}</a>`).join('');
   const lines = [];
   const built = [];
@@ -196,6 +207,7 @@ async function main() {
     if (!only) c.build();
     const ms = performance.now() - t0;
     applyPose(c.key, o);
+    applyWreck(o, mats);
     if (only) {
       o.root.position.set(0, 0, 0);
       o.root.rotation.y = 0;
@@ -222,10 +234,12 @@ async function main() {
     if (isAir || isView) ground.position.y = bb.min.y - (isView ? 0.05 : 2);
     else if (only === 'lct') { ground.position.y = -1.2; }
     const sph = bb.getBoundingSphere(new THREE.Sphere());
-    const dist = sph.radius / Math.sin((camera.fov * PI) / 360) * 0.95;
+    const zoom = parseFloat(params.get('zoom') || '1');
+    const dist = sph.radius / Math.sin((camera.fov * PI) / 360) * 0.95 / zoom;
     const dirs = {
       front: [0.15, 0.2, 1], side: [1, 0.12, 0], rear: [-0.3, 0.3, -1], top: [0.01, 1, 0.02], iso: [0.9, 0.55, 0.9],
       left: [1, 0.25, 0.3], right: [-1, 0.25, 0.3], under: [0.3, -0.6, 0.6], fp: [0, 0.18, 1],
+      rearlow: [-0.35, -0.08, -1], closeRear: [-0.3, 0.05, -1],
     };
     let d = dirs[view] || (isView ? dirs.fp : dirs.iso);
     const dir = new THREE.Vector3(...d).normalize();
@@ -254,8 +268,16 @@ async function main() {
     Object.assign(sun.shadow.camera, { left: -r, right: r, top: r, bottom: -r, near: 1, far: 200 });
     sun.shadow.camera.updateProjectionMatrix();
   } else {
-    camera.position.set(40, 45, 75);
-    controls.target.set(0, 3, -35);
+    const cams = {
+      ground: [[-6, 6.5, 15], [-5, 1, 0]],
+      props: [[19, 7, 17], [19, 1.5, 0]],
+      air: [[40, 30, -10], [0, 8, -90]],
+      sea: [[18, 14, -6], [0, 1, -26]],
+      view: [[-1.5, 3.4, 12.2], [0.3, 1.2, 18.5]],
+    };
+    const cp = cams[params.get('cam')] || [[40, 45, 75], [0, 3, -35]];
+    camera.position.set(...cp[0]);
+    controls.target.set(...cp[1]);
     Object.assign(sun.shadow.camera, { left: -140, right: 140, top: 140, bottom: -140, near: 1, far: 400 });
     sun.position.set(60, 120, 40);
     sun.target.position.set(0, 0, -40);
@@ -269,10 +291,11 @@ async function main() {
     renderer.setSize(innerWidth, innerHeight);
   });
 
-  const clock = new THREE.Clock();
+  const timer = new THREE.Timer();
   let frames = 0;
   renderer.setAnimationLoop(() => {
-    const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+    timer.update();
+    const dt = Math.min(timer.getDelta(), 0.05), t = timer.getElapsed();
     for (const { c, o } of built) spin(c.key, o, t, dt);
     controls.update();
     renderer.render(scene, camera);

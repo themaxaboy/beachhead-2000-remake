@@ -2,11 +2,17 @@
  * synth.js — procedural sound design for the Beach Head 2000 remake.
  *
  * Every sound is synthesized at load time; no sample files are used. Each recipe builds a small
- * Web Audio graph inside its own OfflineAudioContext (noise / oscillator sources -> biquads ->
- * enveloped gains -> WaveShaper saturation -> delay-line reflections), optionally fed by
- * JS-generated excitation buffers (modal "struck metal" partials, granular debris/sand, bubble
- * chirps, rotor-blade pulse trains). Renders run concurrently on the audio threads, then a small
- * JS pass removes DC, soft-limits ("punch"), trims silence and normalizes.
+ * Web Audio graph inside its own OfflineAudioContext (noise / wavetable / oscillator sources ->
+ * biquads -> enveloped gains -> WaveShaper saturation), optionally fed by JS-generated excitation
+ * buffers (modal "struck metal" partials, granular debris/sand, bubble chirps, rotor-blade and
+ * diesel pulse trains). Renders run concurrently on the audio threads; a JS pass then adds
+ * discrete terrain reflections and a small Freeverb-style tail where a recipe asks for them,
+ * removes DC, soft-limits ("punch"), trims silence and normalizes.
+ *
+ * Performance notes (budget: < 2.5 s for everything): nodes that wait for a late start cost
+ * nearly as much as active ones in an offline render, so late events are either baked into JS
+ * excitation buffers or pre-rendered as separate short parts (musical stings); sine tones use a
+ * shared wavetable because every OscillatorNode type builds its own tables per context.
  *
  * Loops are made seamless by construction: every source inside a loop graph is periodic with
  * the loop length L (looped noise buffers of exactly L samples, oscillator/LFO frequencies that
@@ -14,7 +20,7 @@
  * states are periodic too, so the window [settle, settle + L) wraps without a seam.
  *
  * Public API:
- *   renderAll(sampleRate, onProgress?) -> Promise<Map<string, AudioBuffer[]>>
+ *   renderAll(sampleRate, onProgress?, options?) -> Promise<Map<string, AudioBuffer[]>>
  *   SOUND_META   { [name]: { loop, loopable, gain, var, ref, reverb, cap, bus, prio, pan2D } }
  *   SOUND_NAMES  string[]
  */
@@ -46,6 +52,14 @@ function hashStr(s) {
 }
 
 let rnd = Math.random;
+// 64k-sample uniform noise table for grain/strike bursts (much cheaper than an RNG call per sample)
+const NT_BITS = 16, NT_MASK = (1 << NT_BITS) - 1;
+const NT = (() => {
+  const r = mulberry32(0x5eed);
+  const t = new Float32Array(1 << NT_BITS);
+  for (let i = 0; i < t.length; i++) t[i] = r() * 2 - 1;
+  return t;
+})();
 const rr = (a, b) => a + (b - a) * rnd();
 const rlog = (a, b) => a * Math.pow(b / a, rnd());
 const sgn = () => (rnd() < 0.5 ? -1 : 1);
@@ -98,11 +112,23 @@ function makeShared(sr) {
   norm(white, 0.35);
   norm(pink, 0.35);
   norm(brown, 0.35);
+  // single-cycle wavetables played by looping buffer sources (pitch = playbackRate * sr / N). Unlike
+  // OscillatorNode they need no per-context band-limited table build (~1 ms per context and type).
+  const N = 2048;
+  const sine = new Float32Array(N), tri = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const ph = (TAU * i) / N;
+    sine[i] = Math.sin(ph);
+    tri[i] = (8 / (Math.PI * Math.PI)) * (Math.sin(ph) - Math.sin(3 * ph) / 9 + Math.sin(5 * ph) / 25 - Math.sin(7 * ph) / 49);
+  }
   return {
     sr,
     white: toBuf(white, sr),
     pink: toBuf(pink, sr),
     brown: toBuf(brown, sr),
+    sine: toBuf(sine, sr),
+    triangle: toBuf(tri, sr),
+    tableHz: sr / N,
     curves: new Map(),
   };
 }
@@ -122,6 +148,7 @@ class Graph {
     this.L = 0; // loop length in samples (loop recipes only)
     this.Ls = 0; // loop length in seconds
     this.LN = null; // periodic white noise of exactly L samples
+    this.echoTaps = []; // [delay, lowpassHz, gain, highpassHz?] applied in JS after rendering (echoJS)
   }
 
   // ---- sources
@@ -151,6 +178,10 @@ class Graph {
   pf(f) {
     return this.Ls ? Math.max(1, Math.round(f * this.Ls)) / this.Ls : f;
   }
+  /** Free-running sine from the shared wavetable (LFOs, steady tones), random start phase. */
+  wt(f, t = 0) {
+    return this.buf(this.S.sine, t, { loop: true, rate: f / this.S.tableHz, offset: rnd() * this.S.sine.duration });
+  }
   osc(type, f, t = 0, dur = this.dur - t) {
     const o = this.c.createOscillator();
     if (typeof type === 'string') o.type = type;
@@ -166,6 +197,15 @@ class Graph {
   f(type, freq, Q, gain) {
     const b = this.c.createBiquadFilter();
     b.type = type;
+    // coefficient updates once per render quantum instead of per sample (sweeps stay smooth)
+    try {
+      b.frequency.automationRate = 'k-rate';
+      b.Q.automationRate = 'k-rate';
+      b.gain.automationRate = 'k-rate';
+      b.detune.automationRate = 'k-rate';
+    } catch {
+      /* older engines: a-rate only */
+    }
     b.frequency.value = Math.min(freq, this.sr * 0.45);
     if (Q != null) b.Q.value = Q;
     if (gain != null) b.gain.value = gain;
@@ -199,11 +239,6 @@ class Graph {
     const w = this.c.createWaveShaper();
     w.curve = curve;
     return w;
-  }
-  dl(t) {
-    const d = this.c.createDelay(Math.max(0.05, t + 0.05));
-    d.delayTime.value = t;
-    return d;
   }
   ch(...nodes) {
     for (let i = 0; i < nodes.length - 1; i++) nodes[i].connect(nodes[i + 1]);
@@ -265,33 +300,78 @@ function nhit(g, t, o = {}) {
   if (dur <= 0.0005) return null;
   return g.layer(g.noise(color, t, dur), pre, env || perc(t, att, tau, level), post, dest);
 }
+/**
+ * Pitched layer (sine or triangle) with an exponential pitch sweep f0 -> f1 over `sw`, played from
+ * the shared wavetable (see makeShared) so no OscillatorNode wavetables are built per context.
+ */
 function tone(g, t, o = {}) {
   const { type = 'sine', f0 = 100, f1 = f0, sw = 0.05, att = 0.001, tau = 0.08, level = 1, pre = [], post = [], dest = g.out, env = null } = o;
   const dur = Math.min(g.dur - t, o.dur ?? att + tau * 8 + 0.005);
   if (dur <= 0.0005) return null;
-  const osc = g.osc(type, f0, t, dur);
-  if (f1 !== f0) sweep(osc.frequency, t, f0, f1, sw);
-  return g.layer(osc, pre, env || perc(t, att, tau, level), post, dest);
+  const hz = g.S.tableHz;
+  const src = g.buf(type === 'triangle' ? g.S.triangle : g.S.sine, t, { loop: true, rate: f0 / hz, dur });
+  if (f1 !== f0) sweep(src.playbackRate, t, f0 / hz, f1 / hz, sw);
+  return g.layer(src, pre, env || perc(t, att, tau, level), post, dest);
 }
 function lpSweep(g, f0, f1, t, T, Q = 0.707) {
   const f = g.lp(f0, Q);
   sweep(f.frequency, t, f0, f1, T);
   return f;
 }
-/** Discrete reflections: from -> delay -> lowpass -> gain -> dest. */
-function echo(g, from, taps, dest = g.out) {
-  for (const [dt, lpf, gain] of taps) g.ch(from, g.dl(dt), g.lp(lpf, 0.5), g.g(gain), dest);
+/** Discrete reflections [[delaySec, lowpassHz, gain, highpassHz?], ...] of the whole render, added in JS post. */
+function echoPost(g, taps) {
+  g.echoTaps.push(...taps);
+}
+/** Each tap: input delayed and darkened by a 2-pole lowpass, added to the output. */
+function echoJS(x, sr, taps) {
+  const src = x.slice();
+  const n = x.length;
+  for (const [dt, f, gn, hpf = 0] of taps) {
+    const D = Math.round(dt * sr);
+    const a = 1 - Math.exp((-TAU * f) / sr);
+    const ah = hpf > 0 ? 1 - Math.exp((-TAU * hpf) / sr) : 0;
+    let y1 = 0, y2 = 0, lo = 0;
+    for (let i = D; i < n; i++) {
+      y1 += a * (src[i - D] - y1);
+      y2 += a * (y1 - y2);
+      lo += ah * (y2 - lo);
+      x[i] += gn * (y2 - lo);
+    }
+  }
+  return x;
 }
 /** Gain node whose gain is 1 + (sum of sine LFOs) * depth — amplitude modulation in series. */
 function amNode(g, depth, freqs) {
+  // one 8 kHz LFO buffer (upsampled by the source) instead of a source+gain chain per sine
   const a = g.g(1);
-  for (const f of freqs) {
-    const o = g.osc('sine', f, 0, g.dur);
-    const d = g.g(depth / freqs.length);
-    o.connect(d);
-    d.connect(a.gain);
+  const lsr = 8000;
+  const loop = g.L > 0;
+  const n = loop ? Math.round(g.Ls * lsr) : Math.ceil(g.dur * lsr) + 2;
+  const b = newBuf(n, lsr);
+  const d = b.getChannelData(0);
+  const ph = freqs.map(() => rnd() * TAU);
+  const k = depth / freqs.length;
+  const B = 16;
+  const val = (i) => {
+    let v = 0;
+    for (let j = 0; j < freqs.length; j++) v += Math.sin((TAU * freqs[j] * i) / lsr + ph[j]);
+    return v * k;
+  };
+  let v0 = val(0);
+  for (let i = 0; i < n; i += B) {
+    const v1 = val(i + B);
+    const end = Math.min(n, i + B);
+    for (let m = i; m < end; m++) d[m] = v0 + ((v1 - v0) * (m - i)) / B;
+    v0 = v1;
   }
+  g.buf(b, 0, { loop }).connect(a.gain);
   return a;
+}
+/** Sum of constant sines [[freq, amp], ...]; in loop recipes each is rounded to whole cycles per loop. */
+function sinesBuf(g, list) {
+  const mix = g.g(1);
+  for (const [f, a] of list) g.ch(g.wt(g.pf(f)), g.g(a), mix);
+  return mix;
 }
 /** Lowpassed noise rumble with slow random-ish amplitude wobble and darkening over time. */
 function rumble(g, t, o = {}) {
@@ -326,17 +406,17 @@ function modalInto(d, sr, hits, wrap = false) {
       const ph = h.phase ?? rnd() * TAU;
       let y2 = A * Math.sin(ph);
       let y1 = A * r * Math.sin(w + ph);
-      const len = wrap ? Math.min(n, Math.ceil(tau * sr * 7)) : Math.min(n - i0, Math.ceil(tau * sr * 7));
+      const len = Math.min(wrap ? n : n - i0, Math.ceil(tau * sr * 6));
+      if (len < 2) continue;
       let i = i0;
-      for (let k = 0; k < len; k++) {
-        let y;
-        if (k === 0) y = y2;
-        else if (k === 1) y = y1;
-        else {
-          y = c2 * y1 - r2 * y2;
-          y2 = y1;
-          y1 = y;
-        }
+      d[i] += y2;
+      if (++i >= n) i = 0;
+      d[i] += y1;
+      if (++i >= n) i = 0;
+      for (let k = 2; k < len; k++) {
+        const y = c2 * y1 - r2 * y2;
+        y2 = y1;
+        y1 = y;
         d[i] += y;
         if (++i >= n) i = 0;
       }
@@ -346,21 +426,27 @@ function modalInto(d, sr, hits, wrap = false) {
       const k = Math.exp(-1 / (tau * sr));
       const len = Math.ceil(tau * sr * 6);
       let e = h.amp * h.strike;
-      let i = i0;
+      let i = i0, p = (rnd() * NT.length) | 0;
       for (let j = 0; j < len; j++) {
         if (i >= n) {
           if (!wrap) break;
           i = 0;
         }
-        d[i++] += e * (rnd() * 2 - 1);
+        d[i++] += e * NT[p];
+        p = (p + 1) & NT_MASK;
         e *= k;
       }
     }
   }
   return d;
 }
+function newBuf(len, sr) {
+  return new AudioBuffer({ length: Math.max(1, len), sampleRate: sr, numberOfChannels: 1 });
+}
 function modalBuf(g, dur, hits) {
-  return toBuf(modalInto(new Float32Array(Math.ceil(dur * g.sr)), g.sr, hits), g.sr);
+  const b = newBuf(Math.ceil(dur * g.sr), g.sr);
+  modalInto(b.getChannelData(0), g.sr, hits);
+  return b;
 }
 /** Poisson-distributed micro noise bursts (crackle, sand, debris, fire). */
 function grainsInto(d, sr, o) {
@@ -376,18 +462,20 @@ function grainsInto(d, sr, o) {
     const len = Math.ceil(tau * sr * 5);
     let e = a;
     let i = Math.floor(t * sr);
+    let p = (rnd() * NT.length) | 0;
     for (let j = 0; j < len; j++, i++) {
       if (i >= n) {
         if (!wrap) break;
         i -= n;
       }
-      d[i] += e * (rnd() * 2 - 1);
+      d[i] += e * NT[p];
+      p = (p + 1) & NT_MASK;
       e *= k;
     }
   }
   return d;
 }
-/** Water droplets / bubbles: upward-chirping damped sines (Van den Doel style). */
+/** Water droplets / bubbles: upward-chirping damped sines (Van den Doel style), phasor oscillator. */
 function bubblesInto(d, sr, o) {
   const { t0 = 0, t1 = d.length / sr, rate, amp, fmin = 800, fmax = 4000, tmin = 0.005, tmax = 0.02, rise = 0.9, wrap = false } = o;
   const n = d.length;
@@ -400,66 +488,103 @@ function bubblesInto(d, sr, o) {
     const a = amp(t) * (0.25 + 0.75 * rnd());
     const len = Math.ceil(tau * sr * 5);
     const dec = Math.exp(-1 / (tau * sr));
-    let e = a, ph = 0;
+    let e = a, c = 1, sn = 0;
     let i = Math.floor(t * sr);
-    for (let j = 0; j < len; j++, i++) {
-      if (i >= n) {
-        if (!wrap) break;
-        i -= n;
+    bubble: for (let j = 0; j < len; j += 16) {
+      const w = (TAU * f0 * (1 + (rise * j) / len)) / sr;
+      const cw = Math.cos(w), sw = Math.sin(w);
+      const end = Math.min(len, j + 16);
+      for (let jj = j; jj < end; jj++, i++) {
+        if (i >= n) {
+          if (!wrap) break bubble;
+          i -= n;
+        }
+        const nc = c * cw - sn * sw;
+        sn = sn * cw + c * sw;
+        c = nc;
+        d[i] += e * (jj < 24 ? jj / 24 : 1) * sn;
+        e *= dec;
       }
-      ph += (TAU * f0 * (1 + (rise * j) / len)) / sr;
-      d[i] += e * (j < 24 ? j / 24 : 1) * Math.sin(ph);
-      e *= dec;
+    }
+  }
+  return d;
+}
+/**
+ * Tonal sweep: phasor oscillator retuned every 32 samples. freq(x)/amp(x) take seconds since t0.
+ * h2/h3 add 2nd/3rd harmonics (Chebyshev identities on the same phasor).
+ */
+function chirpInto(d, sr, t0, t1, freq, amp, h2 = 0, h3 = 0) {
+  const i0 = Math.max(0, Math.floor(t0 * sr)), i1 = Math.min(d.length, Math.floor(t1 * sr));
+  let c = 1, sn = 0;
+  const B = 32, bs = B / sr;
+  for (let i = i0; i < i1; i += B) {
+    const x = (i - i0) / sr;
+    const w = (TAU * freq(x)) / sr;
+    const cw = Math.cos(w), sw = Math.sin(w);
+    const a0 = amp(x), da = (amp(x + bs) - a0) / B;
+    const end = Math.min(i1, i + B);
+    for (let k = i; k < end; k++) {
+      const nc = c * cw - sn * sw;
+      sn = sn * cw + c * sw;
+      c = nc;
+      d[k] += (a0 + da * (k - i)) * (sn + h2 * 2 * sn * c + h3 * (3 * sn - 4 * sn * sn * sn));
     }
   }
   return d;
 }
 function jsBuf(g, fill) {
-  const d = new Float32Array(g.len);
-  fill(d, g.sr);
-  return toBuf(d, g.sr);
+  const b = newBuf(g.len, g.sr);
+  fill(b.getChannelData(0), g.sr);
+  return b;
 }
 
 // ---- JS post effects
-/** Compact Freeverb-style reverb (6 damped combs + 3 allpasses); wet energy set relative to dry. */
+/**
+ * Compact Freeverb-style reverb (6 damped combs + 3 allpasses) run at half the sample rate (the
+ * damped tail has little energy up there) and mixed back in; wet energy is set relative to dry.
+ */
 function reverbJS(x, sr, { rt = 1.4, mix = 0.2, damp = 0.35, pre = 0.012 } = {}) {
-  const n = x.length;
-  const scale = sr / 44100;
-  const cl = [1116, 1188, 1277, 1356, 1422, 1491].map((v) => Math.round(v * scale));
-  const al = [556, 441, 341].map((v) => Math.round(v * scale));
-  const cb = cl.map((l) => new Float32Array(l));
-  const ci = new Int32Array(6);
-  const cs = new Float64Array(6);
-  const cg = cl.map((l) => Math.pow(10, (-3 * (l / sr)) / rt));
-  const ab = al.map((l) => new Float32Array(l));
-  const ai = new Int32Array(3);
-  const preN = Math.round(pre * sr);
-  const wet = new Float32Array(n);
+  const h = x.length >> 1;
+  const rs = sr / 2;
+  const xs = new Float32Array(h);
+  for (let i = 0; i < h; i++) xs[i] = 0.5 * (x[2 * i] + x[2 * i + 1]);
+  const k = rs / 44100;
+  const L0 = Math.round(1116 * k), L1 = Math.round(1188 * k), L2 = Math.round(1277 * k);
+  const L3 = Math.round(1356 * k), L4 = Math.round(1422 * k), L5 = Math.round(1491 * k);
+  const A0 = Math.round(556 * k), A1 = Math.round(441 * k), A2 = Math.round(341 * k);
+  const fb = (l) => Math.pow(10, (-3 * (l / rs)) / rt);
+  const g0 = fb(L0), g1 = fb(L1), g2 = fb(L2), g3 = fb(L3), g4 = fb(L4), g5 = fb(L5);
+  const b0 = new Float32Array(L0), b1 = new Float32Array(L1), b2 = new Float32Array(L2);
+  const b3 = new Float32Array(L3), b4 = new Float32Array(L4), b5 = new Float32Array(L5);
+  const a0 = new Float32Array(A0), a1 = new Float32Array(A1), a2 = new Float32Array(A2);
+  let i0 = 0, i1 = 0, i2 = 0, i3 = 0, i4 = 0, i5 = 0, j0 = 0, j1 = 0, j2 = 0;
+  let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0;
   const d1 = 1 - damp;
-  for (let i = 0; i < n; i++) {
-    const inp = i >= preN ? x[i - preN] : 0;
-    let s = 0;
-    for (let c = 0; c < 6; c++) {
-      const b = cb[c];
-      const o = b[ci[c]];
-      cs[c] = o * d1 + cs[c] * damp;
-      b[ci[c]] = inp + cs[c] * cg[c];
-      if (++ci[c] >= b.length) ci[c] = 0;
-      s += o;
-    }
-    for (let a = 0; a < 3; a++) {
-      const b = ab[a];
-      const bo = b[ai[a]];
-      b[ai[a]] = s + bo * 0.5;
-      s = bo - s;
-      if (++ai[a] >= b.length) ai[a] = 0;
-    }
-    wet[i] = s;
-  }
+  const preN = Math.round(pre * rs);
+  const wet = new Float32Array(h + 1);
   let ed = 0, ew = 0;
-  for (let i = 0; i < n; i++) (ed += x[i] * x[i]), (ew += wet[i] * wet[i]);
-  const k = ew > 0 ? mix * Math.sqrt(ed / ew) : 0;
-  for (let i = 0; i < n; i++) x[i] += wet[i] * k;
+  for (let i = 0; i < h; i++) {
+    const inp = i >= preN ? xs[i - preN] : 0;
+    let o, s;
+    o = b0[i0]; s0 = o * d1 + s0 * damp; b0[i0] = inp + s0 * g0; if (++i0 === L0) i0 = 0; s = o;
+    o = b1[i1]; s1 = o * d1 + s1 * damp; b1[i1] = inp + s1 * g1; if (++i1 === L1) i1 = 0; s += o;
+    o = b2[i2]; s2 = o * d1 + s2 * damp; b2[i2] = inp + s2 * g2; if (++i2 === L2) i2 = 0; s += o;
+    o = b3[i3]; s3 = o * d1 + s3 * damp; b3[i3] = inp + s3 * g3; if (++i3 === L3) i3 = 0; s += o;
+    o = b4[i4]; s4 = o * d1 + s4 * damp; b4[i4] = inp + s4 * g4; if (++i4 === L4) i4 = 0; s += o;
+    o = b5[i5]; s5 = o * d1 + s5 * damp; b5[i5] = inp + s5 * g5; if (++i5 === L5) i5 = 0; s += o;
+    o = a0[j0]; a0[j0] = s + o * 0.5; s = o - s; if (++j0 === A0) j0 = 0;
+    o = a1[j1]; a1[j1] = s + o * 0.5; s = o - s; if (++j1 === A1) j1 = 0;
+    o = a2[j2]; a2[j2] = s + o * 0.5; s = o - s; if (++j2 === A2) j2 = 0;
+    wet[i] = s;
+    ed += xs[i] * xs[i];
+    ew += s * s;
+  }
+  const kw = ew > 0 ? mix * Math.sqrt(ed / ew) : 0;
+  for (let i = 0; i < h; i++) {
+    const w0 = wet[i] * kw;
+    x[2 * i] += w0;
+    x[2 * i + 1] += 0.5 * (w0 + wet[i + 1] * kw);
+  }
   return x;
 }
 const rv = (o) => (d, sr) => reverbJS(d, sr, o);
@@ -496,7 +621,7 @@ function def(name, meta, build) {
 // PLAYER WEAPONS (2D)
 // ================================================================================================
 
-def('mg', { dur: 0.42, variants: 4, var: 0.03, cap: 8, gain: 0.6, reverb: 0.1, prio: 3, punch: 2.2, pan2D: 0.14 }, (g) => {
+def('mg', { dur: 0.4, variants: 4, var: 0.03, cap: 8, gain: 0.6, reverb: 0.1, prio: 3, punch: 1.8, pan2D: 0.14 }, (g) => {
   const t = 0.001;
   const bus = g.g(1);
   bus.connect(g.out);
@@ -505,9 +630,9 @@ def('mg', { dur: 0.42, variants: 4, var: 0.03, cap: 8, gain: 0.6, reverb: 0.1, p
   // muzzle blast bark
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, 7000, rr(650, 850), t, 0.1, 0.9), g.pk(rr(950, 1250), 1.2, 6)], att: 0.0005, tau: rr(0.024, 0.032), level: 1.2, dest: bus });
   // chest thump
-  tone(g, t, { f0: rr(150, 172), f1: rr(46, 54), sw: 0.07, att: 0.0012, tau: rr(0.038, 0.048), level: 1.4, post: [g.ws(2.4)], dest: bus });
+  tone(g, t, { f0: rr(150, 172), f1: rr(48, 56), sw: 0.06, att: 0.0012, tau: rr(0.026, 0.032), level: 1.2, post: [g.ws(2)], dest: bus });
   // low pressure punch
-  nhit(g, t, { color: 'brown', pre: [g.lp(240)], att: 0.0015, tau: 0.05, level: 1.0, dest: bus });
+  nhit(g, t, { color: 'brown', pre: [g.lp(240)], att: 0.0015, tau: 0.032, level: 0.8, dest: bus });
   // bolt / feed-tray clack
   const mb = modalBuf(g, 0.22, [
     { t: t + rr(0.022, 0.03), amp: 0.22, strike: 0.6, parts: metal(rr(1700, 2100), [1, 1.71, 2.53, 3.4], 0.022) },
@@ -515,10 +640,10 @@ def('mg', { dur: 0.42, variants: 4, var: 0.03, cap: 8, gain: 0.6, reverb: 0.1, p
   ]);
   g.ch(g.buf(mb), g.hp(900), bus);
   // close reflections (sandbags, bunker slit)
-  echo(g, bus, [
-    [rr(0.032, 0.042), 2400, 0.3],
-    [rr(0.07, 0.09), 1400, 0.18],
-    [rr(0.13, 0.16), 900, 0.1],
+  echoPost(g, [
+    [rr(0.032, 0.042), 2400, 0.3, 300],
+    [rr(0.07, 0.09), 1400, 0.18, 250],
+    [rr(0.13, 0.16), 900, 0.1, 200],
   ]);
 });
 
@@ -527,14 +652,26 @@ def('mgTail', { dur: 1.7, variants: 3, var: 0.05, cap: 2, gain: 0.5, reverb: 0.2
   bus.connect(g.out);
   // the burst's rhythm echoing back from the dunes
   const n = 5 + Math.floor(rnd() * 3);
-  let tt = rr(0.03, 0.06);
-  for (let k = 0; k < n; k++) {
-    nhit(g, tt, { color: 'pink', pre: [g.bp(rr(450, 750), 0.8), g.lp(1500)], att: 0.004, tau: rr(0.035, 0.05), level: 0.9 * Math.exp(-k * 0.42), dest: bus });
-    tt += rr(0.085, 0.1);
-  }
+  const pulses = jsBuf(g, (d, sr) => {
+    let tt = rr(0.03, 0.06);
+    for (let k = 0; k < n; k++) {
+      // noise burst, 4 ms attack, exponential decay
+      const a = 0.9 * Math.exp(-k * 0.42), tau = rr(0.035, 0.05);
+      const i0 = Math.floor(tt * sr), len = Math.min(d.length - i0, Math.ceil(tau * 7 * sr)), att = 0.004 * sr;
+      const kd = Math.exp(-1 / (tau * sr));
+      let e = a, p = (rnd() * NT.length) | 0;
+      for (let j = 0; j < len; j++) {
+        d[i0 + j] += NT[p] * e * (j < att ? j / att : 1);
+        p = (p + 1) & NT_MASK;
+        if (j >= att) e *= kd;
+      }
+      tt += rr(0.085, 0.1);
+    }
+  });
+  g.ch(g.buf(pulses), g.bp(rr(500, 700), 0.8), g.lp(1500), bus);
   nhit(g, 0, { color: 'pink', pre: [g.bp(700, 0.5)], env: swell(0, 0.06, 0.3, 0.3), dur: 1.6, dest: bus });
   rumble(g, 0, { f: 200, att: 0.03, tau: 0.42, level: 0.5, dest: bus });
-  echo(g, bus, [
+  echoPost(g, [
     [0.23, 900, 0.35],
     [0.5, 600, 0.2],
   ]);
@@ -569,20 +706,20 @@ def('brass', { dur: 1.0, variants: 4, var: 0.08, cap: 4, gain: 0.3, reverb: 0.05
   g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(1200), g.out);
 });
 
-def('at', { dur: 3.2, variants: 3, var: 0.03, cap: 2, gain: 1, reverb: 0.3, prio: 3, punch: 2.0, post: rv({ rt: 1.8, mix: 0.1 }) }, (g) => {
+def('at', { dur: 3.0, variants: 3, var: 0.03, cap: 2, gain: 1, reverb: 0.3, prio: 3, punch: 1.6, post: rv({ rt: 1.8, mix: 0.1 }) }, (g) => {
   const t = 0.002;
   const bus = g.g(1);
   bus.connect(g.out);
   nhit(g, t, { pre: [g.hp(1400)], att: 0.0002, tau: 0.004, level: 1.0, post: [g.ws(3)], dest: bus });
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, 7500, rr(350, 450), t, 0.35, 0.8), g.pk(600, 1, 4)], att: 0.001, tau: rr(0.08, 0.1), level: 1.3, post: [g.ws(1.6)], dest: bus });
-  tone(g, t, { f0: rr(85, 96), f1: 32, sw: 0.25, att: 0.002, tau: 0.22, level: 1.8, post: [g.ws(2)], dest: bus });
-  nhit(g, t, { color: 'brown', pre: [g.lp(180)], att: 0.003, tau: 0.35, level: 1.1, dest: bus });
+  tone(g, t, { f0: rr(85, 96), f1: 34, sw: 0.22, att: 0.002, tau: 0.17, level: 1.4, post: [g.ws(1.6)], dest: bus });
+  nhit(g, t, { color: 'brown', pre: [g.lp(180)], att: 0.003, tau: 0.25, level: 1.0, dest: bus });
   rumble(g, t + 0.02, { f: 320, f1: 140, att: 0.1, tau: 0.7, level: 0.55, am: 0.35, dest: bus });
   // diffuse outdoor tail
   nhit(g, t, { color: 'pink', pre: [g.bp(900, 0.5)], env: swell(t + 0.01, t + 0.08, 0.55, 0.28), dur: 3, dest: g.out });
   // breech recoil clunk
   g.ch(g.buf(modalBuf(g, 1, [{ t: rr(0.11, 0.14), amp: 0.3, strike: 0.3, parts: metal(rr(200, 240), [1, 2.45, 4.1, 6.7], 0.15) }])), g.out);
-  echo(g, bus, [
+  echoPost(g, [
     [rr(0.17, 0.22), 1500, 0.35],
     [rr(0.4, 0.48), 900, 0.25],
     [rr(0.75, 0.9), 600, 0.15],
@@ -592,9 +729,9 @@ def('at', { dur: 3.2, variants: 3, var: 0.03, cap: 2, gain: 1, reverb: 0.3, prio
 def('atReload', { dur: 0.75, variants: 3, var: 0.04, cap: 2, gain: 0.7, reverb: 0.1, prio: 3 }, (g) => {
   const tc = rr(0.4, 0.45);
   const hits = [
-    { t: 0.01, amp: 0.9, strike: 0.5, parts: metal(rr(290, 330), [1, 2.32, 4.25, 6.8, 9.9], 0.12) },
+    { t: 0.01, amp: 0.9, strike: 0.5, parts: metal(rr(290, 330), [1, 2.32, 4.25, 6.8, 9.9], 0.08) },
     { t: rr(0.035, 0.05), amp: 0.35, strike: 0.6, parts: metal(rr(1500, 1800), [1, 1.55, 2.2], 0.03) },
-    { t: tc, amp: 1.0, strike: 0.6, parts: metal(rr(250, 280), [1, 2.4, 4.1, 6.3, 9.2], 0.14) },
+    { t: tc, amp: 1.0, strike: 0.6, parts: metal(rr(250, 280), [1, 2.4, 4.1, 6.3, 9.2], 0.09) },
     { t: tc + rr(0.03, 0.045), amp: 0.45, strike: 0.7, parts: metal(rr(2600, 3200), [1, 1.48, 2.1], 0.025) },
   ];
   for (let k = 0; k < 4; k++) hits.push({ t: rr(0.12, 0.3), amp: rr(0.05, 0.12), strike: 0.8, parts: metal(rr(2000, 3500), [1, 1.6], 0.012) });
@@ -638,9 +775,9 @@ def('pistol', { dur: 0.6, variants: 3, var: 0.04, cap: 4, gain: 0.8, reverb: 0.1
   ]);
   g.ch(g.buf(mb), g.hp(1000), bus);
   nhit(g, t, { color: 'pink', pre: [g.bp(1400, 0.6)], env: swell(t, t + 0.012, 0.11, 0.2), dur: 0.55 });
-  echo(g, bus, [
-    [rr(0.03, 0.04), 2500, 0.25],
-    [rr(0.08, 0.1), 1500, 0.15],
+  echoPost(g, [
+    [rr(0.03, 0.04), 2500, 0.25, 300],
+    [rr(0.08, 0.1), 1500, 0.15, 250],
   ]);
 });
 
@@ -663,18 +800,18 @@ def('pistolReload', { dur: 1.3, variants: 2, var: 0.03, cap: 1, gain: 0.7, rever
   tone(g, tRel, { f0: 220, f1: 130, sw: 0.02, tau: 0.02, level: 0.7 });
 });
 
-def('howitzer', { dur: 5.5, variants: 3, var: 0.03, cap: 2, gain: 1, reverb: 0.3, prio: 3, punch: 2.0, post: rv({ rt: 2.4, mix: 0.12 }) }, (g) => {
+def('howitzer', { dur: 5.0, variants: 3, var: 0.03, cap: 2, gain: 1, reverb: 0.3, prio: 3, punch: 1.7, post: rv({ rt: 2.4, mix: 0.12 }) }, (g) => {
   const t = 0.002;
   const bus = g.g(1);
   bus.connect(g.out);
   nhit(g, t, { pre: [g.hp(900)], att: 0.0002, tau: 0.006, level: 1.0, post: [g.ws(3)], dest: bus });
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, 6000, 260, t, 0.6, 0.8), g.pk(450, 0.8, 4)], att: 0.0015, tau: rr(0.13, 0.16), level: 1.4, post: [g.ws(1.8)], dest: bus });
-  tone(g, t, { f0: rr(58, 66), f1: 24, sw: 0.45, att: 0.003, tau: 0.45, level: 2.0, post: [g.ws(2)], dest: bus });
+  tone(g, t, { f0: rr(58, 66), f1: 26, sw: 0.4, att: 0.003, tau: 0.34, level: 1.7, post: [g.ws(1.7)], dest: bus });
   nhit(g, t, { color: 'brown', pre: [g.lp(150)], att: 0.004, tau: 0.6, level: 1.3, dest: bus });
   rumble(g, t + 0.03, { f: 320, f1: 90, att: 0.1, peakAt: t + 0.35, tau: 1.3, level: 0.75, am: 0.4, dest: bus });
   nhit(g, t, { color: 'pink', pre: [g.bp(700, 0.5)], env: swell(t + 0.01, t + 0.12, 0.9, 0.3), dur: 5 });
   g.ch(g.buf(modalBuf(g, 1.5, [{ t: rr(0.22, 0.28), amp: 0.3, strike: 0.3, parts: metal(rr(170, 200), [1, 2.4, 4.3, 6.9], 0.2) }])), g.out);
-  echo(g, bus, [
+  echoPost(g, [
     [rr(0.32, 0.4), 1000, 0.4],
     [rr(0.85, 1.0), 700, 0.3],
     [rr(1.5, 1.7), 500, 0.22],
@@ -709,7 +846,7 @@ def('switch', { dur: 0.5, variants: 3, var: 0.05, cap: 2, gain: 0.7, reverb: 0.0
 });
 
 def('lockTone', { dur: 0.14, variants: 1, var: 0, cap: 3, gain: 0.4, reverb: 0, bus: 'ui', prio: 4 }, (g) => {
-  g.layer(g.osc('sine', 1250, 0.001, 0.13), [], hold(0.001, 0.004, 0.1, 0.012, 1));
+  g.layer(g.wt(1250, 0.001), [], hold(0.001, 0.004, 0.1, 0.012, 1));
   g.layer(g.osc('square', 1250, 0.001, 0.13), [g.lp(3500)], hold(0.001, 0.004, 0.1, 0.012, 0.12));
 });
 
@@ -737,7 +874,7 @@ function explosion(g, P) {
   bus.connect(g.out);
   nhit(g, t, { pre: [g.hp(P.crackHp)], att: 0.0002, tau: P.crackTau, level: P.crack ?? 1, post: [g.ws(3)], dest: bus });
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, P.bf0, P.bf1, t, P.bsw, 0.8), g.pk(P.bpk ?? 500, 0.9, 4)], att: 0.001, tau: P.btau, level: P.blast ?? 1.2, post: [g.ws(1.6)], dest: bus });
-  tone(g, t, { f0: P.sf0, f1: P.sf1, sw: P.ssw, att: 0.002, tau: P.stau, level: P.sub ?? 1.6, post: [g.ws(2)], dest: bus });
+  tone(g, t, { f0: P.sf0, f1: P.sf1, sw: P.ssw, att: 0.002, tau: P.stau, level: P.sub ?? 1.6, post: [g.ws(1.6)], dest: bus });
   nhit(g, t, { color: 'brown', pre: [g.lp(P.bodyLp ?? 220)], att: 0.003, tau: P.bodyTau, level: P.body ?? 1, dest: bus });
   rumble(g, t + 0.02, { f: P.rf, f1: P.rf * 0.4, att: 0.06, peakAt: t + P.rpeak, tau: P.rtau, level: P.rumble, am: 0.4, dest: bus });
   if (P.dirt) {
@@ -754,13 +891,13 @@ function explosion(g, P) {
     );
     g.ch(g.buf(d), g.hp(1400), g.pk(3200, 1, 4), g.g(P.crackle), bus);
   }
-  // bright outdoor diffuse tail (not echoed)
+  // bright outdoor diffuse tail
   nhit(g, t, { color: 'pink', pre: [g.bp(P.tailF ?? 800, 0.5)], env: swell(t + 0.01, t + 0.09, P.tailTau ?? 0.5, P.tail ?? 0.25), dur: g.dur - t });
-  echo(g, bus, P.echoes);
+  echoPost(g, P.echoes);
   return bus;
 }
 
-def('explosionS', { dur: 2.2, variants: 4, var: 0.06, cap: 6, gain: 0.85, ref: 25, reverb: 0.3, prio: 2, punch: 1.8 }, (g) => {
+def('explosionS', { dur: 2.2, variants: 4, var: 0.06, cap: 6, gain: 0.85, ref: 25, reverb: 0.3, prio: 2, punch: 1.6 }, (g) => {
   explosion(g, {
     crackHp: 1200, crackTau: 0.004,
     bf0: 6000, bf1: rr(450, 600), bsw: 0.25, btau: rr(0.05, 0.07), blast: 1.2, bpk: 700,
@@ -773,11 +910,11 @@ def('explosionS', { dur: 2.2, variants: 4, var: 0.06, cap: 6, gain: 0.85, ref: 2
   });
 });
 
-def('explosionM', { dur: 3.2, variants: 4, var: 0.06, cap: 5, gain: 0.95, ref: 40, reverb: 0.35, prio: 2, punch: 2.0 }, (g) => {
+def('explosionM', { dur: 3.0, variants: 4, var: 0.06, cap: 5, gain: 0.95, ref: 40, reverb: 0.35, prio: 2, punch: 1.6 }, (g) => {
   explosion(g, {
     crackHp: 900, crackTau: 0.006,
     bf0: 5000, bf1: rr(280, 350), bsw: 0.4, btau: rr(0.09, 0.11), blast: 1.3, bpk: 500,
-    sf0: rr(66, 76), sf1: 28, ssw: 0.3, stau: 0.3, sub: 1.8,
+    sf0: rr(66, 76), sf1: 30, ssw: 0.28, stau: 0.24, sub: 1.6,
     bodyTau: 0.4, body: 1.0,
     rf: 260, rpeak: 0.25, rtau: 0.8, rumble: 0.5,
     dirt: 0.4, dirtRate: 2200, dirtTau: 0.45, dirtEnd: 2.0,
@@ -787,11 +924,11 @@ def('explosionM', { dur: 3.2, variants: 4, var: 0.06, cap: 5, gain: 0.95, ref: 4
   });
 });
 
-def('explosionL', { dur: 4.6, variants: 3, var: 0.05, cap: 4, gain: 1, ref: 60, reverb: 0.35, prio: 2, punch: 2.0 }, (g) => {
+def('explosionL', { dur: 4.3, variants: 3, var: 0.05, cap: 4, gain: 1, ref: 60, reverb: 0.35, prio: 2, punch: 1.6 }, (g) => {
   const bus = explosion(g, {
     crackHp: 800, crackTau: 0.007,
     bf0: 5000, bf1: rr(220, 280), bsw: 0.5, btau: rr(0.12, 0.14), blast: 1.35, bpk: 420,
-    sf0: rr(58, 66), sf1: 24, ssw: 0.4, stau: 0.42, sub: 2.0,
+    sf0: rr(58, 66), sf1: 27, ssw: 0.35, stau: 0.32, sub: 1.7,
     bodyTau: 0.55, body: 1.2, bodyLp: 180,
     rf: 240, rpeak: 0.35, rtau: 1.3, rumble: 0.7,
     dirt: 0.3, dirtRate: 1600, dirtTau: 0.6, dirtEnd: 2.5,
@@ -800,7 +937,7 @@ def('explosionL', { dur: 4.6, variants: 3, var: 0.05, cap: 4, gain: 1, ref: 60, 
     echoes: [[rr(0.36, 0.44), 900, 0.32], [rr(0.95, 1.1), 600, 0.22], [rr(1.7, 1.95), 420, 0.14]],
   });
   // vehicle hull tearing: low metal crunch
-  const hits = [{ t: 0.004, amp: 0.5, strike: 0.4, parts: metal(rr(130, 160), [1, 2.35, 4.4, 7.1, 10.5], 0.45) }];
+  const hits = [{ t: 0.004, amp: 0.35, strike: 0.6, parts: metal(rr(130, 160), [1, 2.35, 4.4, 7.1, 10.5, 13.8], 0.16, 0.04) }];
   // secondary cook-off
   const t2 = rr(0.22, 0.45);
   nhit(g, t2, { color: 'pink', pre: [lpSweep(g, 3500, 380, t2, 0.25)], att: 0.002, tau: 0.08, level: 0.9, post: [g.ws(1.5)], dest: bus });
@@ -811,7 +948,7 @@ def('explosionL', { dur: 4.6, variants: 3, var: 0.05, cap: 4, gain: 1, ref: 60, 
   const nd = 6 + Math.floor(rnd() * 5);
   for (let k = 0; k < nd; k++) {
     const tk = rr(0.5, 3.3);
-    hits.push({ t: tk, amp: rr(0.08, 0.3) * Math.exp(-(tk - 0.5) / 2.5), strike: 0.6, parts: metal(rlog(600, 2600), [1, 1.53, 2.31, 3.1], rr(0.04, 0.12)) });
+    hits.push({ t: tk, amp: rr(0.06, 0.22) * Math.exp(-(tk - 0.5) / 2.5), strike: 1.2, strikeTau: 0.0015, parts: metal(rlog(500, 2400), [1, 1.53, 2.31, 3.1], rr(0.02, 0.06)) });
   }
   g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(90), g.g(0.9), bus);
 });
@@ -825,7 +962,7 @@ def('impactSand', { dur: 0.5, variants: 4, var: 0.08, cap: 8, gain: 0.6, ref: 6,
   g.ch(g.buf(d), g.hp(1800), g.lp(9000), g.g(rr(0.35, 0.5)), g.out);
 });
 
-def('impactMetal', { dur: 0.9, variants: 4, var: 0.06, cap: 6, gain: 0.6, ref: 8, reverb: 0.12, prio: 1 }, (g) => {
+def('impactMetal', { dur: 0.6, variants: 4, var: 0.06, cap: 6, gain: 0.6, ref: 8, reverb: 0.12, prio: 1 }, (g) => {
   const f0 = rr(1400, 2600);
   const hits = [
     {
@@ -833,30 +970,27 @@ def('impactMetal', { dur: 0.9, variants: 4, var: 0.06, cap: 6, gain: 0.6, ref: 8
       amp: 1,
       strike: 1.0,
       strikeTau: 0.0008,
-      parts: [[f0, rr(0.25, 0.4), 1], [f0 * 1.47, 0.22, 0.7], [f0 * 2.09, 0.16, 0.5], [f0 * 2.56, 0.12, 0.4], [f0 * 3.14, 0.08, 0.3], [f0 * 4.2, 0.05, 0.2], [f0 * 0.53, 0.1, 0.3]],
+      parts: [[f0, rr(0.1, 0.18), 1], [f0 * 1.47, 0.09, 0.7], [f0 * 2.09, 0.07, 0.5], [f0 * 2.56, 0.05, 0.4], [f0 * 3.14, 0.04, 0.3], [f0 * 4.2, 0.03, 0.2], [f0 * 0.53, 0.05, 0.35]],
     },
   ];
-  g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(400), g.g(0.8), g.out);
-  nhit(g, 0.001, { pre: [g.hp(2500)], tau: 0.0015, level: 0.8, post: [g.ws(2)] });
-  tone(g, 0.001, { f0: 320, f1: 200, sw: 0.02, tau: 0.02, level: 0.35 });
+  g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(400), g.g(0.7), g.out);
+  nhit(g, 0.001, { pre: [g.hp(2500)], tau: 0.0015, level: 0.9, post: [g.ws(2)] });
+  nhit(g, 0.001, { pre: [g.bp(rr(2500, 4000), 1.5)], tau: 0.02, level: 0.45 }); // clank
+  tone(g, 0.001, { f0: 320, f1: 200, sw: 0.02, tau: 0.02, level: 0.4 });
 });
 
 def('ricochet', { dur: 1.0, variants: 4, var: 0.08, cap: 4, gain: 0.5, ref: 10, reverb: 0.15, prio: 1 }, (g) => {
   const t0 = 0.004;
   const f0 = rr(3200, 4800), f1 = rr(900, 1500), T = rr(0.4, 0.6), am = rr(35, 70), amD = rr(0.3, 0.55);
-  const whine = jsBuf(g, (d, sr) => {
-    let ph = 0;
-    const end = Math.min(d.length, Math.floor((t0 + T * 1.6) * sr));
-    const fadeN = Math.floor(0.12 * sr);
-    for (let i = Math.floor(t0 * sr); i < end; i++) {
-      const x = i / sr - t0;
-      const f = f1 + (f0 - f1) * Math.exp(-x / (T * 0.35));
-      ph += (TAU * f) / sr;
-      let env = Math.min(1, x / 0.006) * Math.exp(-x / (T * 0.5)) * (1 - amD * (0.5 + 0.5 * Math.sin(TAU * am * x)));
-      if (i > end - fadeN) env *= (end - i) / fadeN;
-      d[i] = env * (Math.sin(ph) + 0.22 * Math.sin(2 * ph + 0.4));
-    }
-  });
+  const Te = T * 1.6;
+  const whine = jsBuf(g, (d, sr) =>
+    chirpInto(
+      d, sr, t0, t0 + Te,
+      (x) => f1 + (f0 - f1) * Math.exp(-x / (T * 0.35)),
+      (x) => Math.min(1, x / 0.006, Math.max(0, (Te - x) / 0.12)) * Math.exp(-x / (T * 0.5)) * (1 - amD * (0.5 + 0.5 * Math.sin(TAU * am * x))),
+      0.22
+    )
+  );
   g.ch(g.buf(whine), g.hp(500), g.g(0.8), g.out);
   const bp = g.bp(f0, 14);
   sweep(bp.frequency, t0, f0, f1 * 1.05, T * 0.9);
@@ -884,34 +1018,34 @@ def('splashBig', { dur: 2.8, variants: 3, var: 0.06, cap: 4, gain: 0.85, ref: 30
   nhit(g, t, { color: 'pink', pre: [g.bp(1200, 0.5), g.hp(350)], env: swell(t, t + 0.1, 0.45, 0.8), dur: 2.6 });
   nhit(g, 0.3, { pre: [g.bp(2500, 0.6)], env: swell(0.3, 0.75, 0.55, 0.45), dur: 2.4 });
   const d = jsBuf(g, (d, sr) => {
-    bubblesInto(d, sr, { t0: 0.15, t1: 2.6, rate: (x) => 240 * Math.exp(-Math.pow((x - 0.9) / 0.8, 2)), amp: (x) => 0.8, fmin: 700, fmax: 4000 });
+    bubblesInto(d, sr, { t0: 0.15, t1: 2.4, rate: (x) => 200 * Math.exp(-Math.pow((x - 0.9) / 0.7, 2)), amp: (x) => 0.8 * Math.min(1, Math.exp(-(x - 0.9) / 0.45)), fmin: 700, fmax: 4000 });
     grainsInto(d, sr, { t0: 0.2, t1: 2.5, rate: (x) => 1400 * Math.exp(-Math.pow((x - 0.8) / 0.7, 2)), amp: () => 0.4, skew: 2 });
   });
   g.ch(g.buf(d), g.hp(500), g.g(0.45), g.out);
 });
 
-def('bunkerHit', { dur: 2.0, variants: 3, var: 0.05, cap: 3, gain: 1, ref: 15, reverb: 0.2, prio: 3, punch: 2.2 }, (g) => {
+def('bunkerHit', { dur: 2.0, variants: 3, var: 0.05, cap: 3, gain: 1, ref: 15, reverb: 0.2, prio: 3, punch: 1.8 }, (g) => {
   const t = 0.002;
   const bus = g.g(1);
   bus.connect(g.out);
   nhit(g, t, { pre: [g.hp(800)], att: 0.0002, tau: 0.005, level: 1.0, post: [g.ws(3)], dest: bus });
   // concrete crunch (gritty distortion)
   nhit(g, t, { color: 'pink', pre: [g.bp(rr(800, 1100), 0.6)], att: 0.001, tau: 0.05, level: 1.0, post: [g.ws(4, 0.15)], dest: bus });
-  tone(g, t, { f0: rr(72, 80), f1: 32, sw: 0.2, att: 0.002, tau: 0.25, level: 2.0, post: [g.ws(2)], dest: bus });
-  nhit(g, t, { color: 'brown', pre: [g.lp(150)], att: 0.003, tau: 0.3, level: 1.2, dest: bus });
+  tone(g, t, { f0: rr(80, 90), f1: 38, sw: 0.12, att: 0.002, tau: 0.11, level: 1.5, post: [g.ws(1.8)], dest: bus });
+  nhit(g, t, { color: 'brown', pre: [g.lp(160)], att: 0.003, tau: 0.16, level: 1.2, dest: bus });
   // bunker structure boom
-  const hits = [{ t: 0.003, amp: 0.35, strike: 0, parts: metal(rr(80, 90), [1, 2.2, 3.6, 5.5], 0.3) }];
+  const hits = [{ t: 0.003, amp: 0.3, strike: 0, parts: metal(rr(80, 90), [1, 2.2, 3.6, 5.5], 0.14) }];
   // pebbles & chunks falling
   for (let k = 0; k < 8; k++) {
     const tk = rr(0.15, 1.4);
-    hits.push({ t: tk, amp: rr(0.03, 0.12) * Math.exp(-tk / 0.8), strike: 1.5, strikeTau: 0.001, parts: metal(rlog(700, 2200), [1, 1.6], 0.012) });
+    hits.push({ t: tk, amp: rr(0.03, 0.12) * Math.exp(-tk / 0.8), strike: 2.5, strikeTau: 0.0012, parts: metal(rlog(700, 2200), [1, 1.6], 0.005) });
   }
   g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(60), bus);
   const d = jsBuf(g, (d, sr) => grainsInto(d, sr, { t0: 0.05, t1: 1.6, rate: (x) => 900 * Math.exp(-x / 0.35) + 60, amp: (x) => Math.exp(-x / 0.5), gmin: 0.0003, gmax: 0.002, skew: 2.5 }));
   g.ch(g.buf(d), g.bp(2200, 0.5), g.g(0.6), bus);
   // dust sifting down
   nhit(g, 0.1, { pre: [g.hp(3000)], env: swell(0.1, 0.35, 0.5, 0.06), dur: 1.8 });
-  echo(g, bus, [[rr(0.05, 0.07), 1500, 0.3], [rr(0.13, 0.17), 900, 0.2]]);
+  echoPost(g, [[rr(0.05, 0.07), 1500, 0.3], [rr(0.13, 0.17), 900, 0.2]]);
 });
 
 def('whizz', { dur: 0.5, variants: 4, var: 0.08, cap: 4, gain: 0.6, ref: 4, reverb: 0.05, prio: 2 }, (g) => {
@@ -926,15 +1060,9 @@ def('whizz', { dur: 0.5, variants: 4, var: 0.08, cap: 4, gain: 0.6, ref: 4, reve
   nhit(g, tp, { pre: [g.hp(3500)], att: 0.0001, tau: 0.0006, level: 1.0, post: [g.ws(2.5)] });
   // tonal whistle
   const fc = rr(1600, 2100);
-  const w = jsBuf(g, (d, sr) => {
-    let ph = 0;
-    for (let i = 0; i < d.length; i++) {
-      const x = i / sr;
-      const f = fc * (1 - 0.32 * Math.tanh((x - tp) / 0.012));
-      ph += (TAU * f) / sr;
-      d[i] = 0.35 * Math.exp(-Math.abs(x - tp) / (x < tp ? 0.02 : 0.05)) * Math.sin(ph);
-    }
-  });
+  const w = jsBuf(g, (d, sr) =>
+    chirpInto(d, sr, 0, g.dur, (x) => fc * (1 - 0.32 * Math.tanh((x - tp) / 0.012)), (x) => 0.35 * Math.exp(-Math.abs(x - tp) / (x < tp ? 0.02 : 0.05)) * Math.min(1, (g.dur - x) / 0.05))
+  );
   g.ch(g.buf(w), g.out);
 });
 
@@ -946,10 +1074,10 @@ def('rifle', { dur: 1.2, variants: 4, var: 0.06, cap: 10, gain: 0.75, ref: 20, r
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, 6000, 1100, t, 0.04), g.pk(rr(700, 1000), 0.9, 5)], att: 0.0004, tau: rr(0.018, 0.026), level: 1.1, dest: bus });
   tone(g, t, { f0: 170, f1: 70, sw: 0.035, tau: 0.028, level: 0.6, post: [g.ws(1.8)], dest: bus });
   nhit(g, t, { color: 'pink', pre: [g.bp(650, 0.5)], env: swell(t + 0.005, t + 0.05, 0.22, 0.3), dur: 1.1 });
-  echo(g, bus, [
-    [rr(0.1, 0.14), 1500, 0.3],
-    [rr(0.26, 0.34), 900, 0.2],
-    [rr(0.5, 0.6), 600, 0.12],
+  echoPost(g, [
+    [rr(0.1, 0.14), 1500, 0.3, 200],
+    [rr(0.26, 0.34), 900, 0.2, 150],
+    [rr(0.5, 0.6), 600, 0.12, 120],
   ]);
 });
 
@@ -961,10 +1089,10 @@ def('enemyMG', { dur: 0.6, variants: 4, var: 0.05, cap: 10, gain: 0.7, ref: 25, 
   nhit(g, t, { color: 'pink', pre: [lpSweep(g, 5500, 900, t, 0.05), g.pk(rr(600, 850), 0.9, 5)], att: 0.0005, tau: rr(0.022, 0.03), level: 1.2, dest: bus });
   tone(g, t, { f0: 135, f1: 58, sw: 0.04, tau: 0.035, level: 0.8, post: [g.ws(2)], dest: bus });
   nhit(g, t, { color: 'pink', pre: [g.bp(600, 0.5)], env: swell(t + 0.004, t + 0.03, 0.1, 0.25), dur: 0.55 });
-  echo(g, bus, [[rr(0.08, 0.11), 1300, 0.22], [rr(0.2, 0.25), 800, 0.12]]);
+  echoPost(g, [[rr(0.08, 0.11), 1300, 0.22, 200], [rr(0.2, 0.25), 800, 0.12, 150]]);
 });
 
-def('tankFire', { dur: 3.0, variants: 3, var: 0.05, cap: 3, gain: 1, ref: 60, reverb: 0.35, prio: 2, punch: 1.8, post: rv({ rt: 1.8, mix: 0.12 }) }, (g) => {
+def('tankFire', { dur: 3.0, variants: 3, var: 0.05, cap: 3, gain: 1, ref: 60, reverb: 0.35, prio: 2, punch: 1.5, post: rv({ rt: 1.8, mix: 0.12 }) }, (g) => {
   explosion(g, {
     crackHp: 1000, crackTau: 0.004, crack: 0.8,
     bf0: 4500, bf1: rr(300, 380), bsw: 0.35, btau: rr(0.08, 0.1), blast: 1.3, bpk: 600,
@@ -1021,17 +1149,14 @@ def('chutePop', { dur: 1.0, variants: 3, var: 0.06, cap: 3, gain: 0.7, ref: 20, 
 
 def('bombWhistle', { dur: 2.3, variants: 3, var: 0.05, cap: 4, gain: 0.7, ref: 60, reverb: 0.2, prio: 2 }, (g) => {
   const T = rr(1.9, 2.15), f0 = rr(1500, 1900), f1 = rr(480, 620);
-  const w = jsBuf(g, (d, sr) => {
-    let ph = 0;
-    const n = Math.min(d.length, Math.floor(T * sr));
-    for (let i = 0; i < n; i++) {
-      const x = i / sr, u = x / T;
-      const f = f0 * Math.pow(f1 / f0, Math.pow(u, 1.25)) * (1 + 0.006 * Math.sin(TAU * 5.5 * x));
-      ph += (TAU * f) / sr;
-      const amp = (0.12 + 0.88 * Math.pow(u, 1.5)) * Math.min(1, x / 0.25) * Math.min(1, (T - x) / 0.05);
-      d[i] = amp * (Math.sin(ph) + 0.18 * Math.sin(2 * ph) + 0.06 * Math.sin(3 * ph));
-    }
-  });
+  const w = jsBuf(g, (d, sr) =>
+    chirpInto(
+      d, sr, 0, T,
+      (x) => f0 * Math.pow(f1 / f0, Math.pow(x / T, 1.25)) * (1 + 0.006 * Math.sin(TAU * 5.5 * x)),
+      (x) => (0.12 + 0.88 * Math.pow(Math.min(1, x / T), 1.5)) * Math.min(1, x / 0.25) * Math.max(0, Math.min(1, (T - x) / 0.05)),
+      0.18, 0.06
+    )
+  );
   g.ch(g.buf(w), g.out);
   const bp = g.bp(f0, 6);
   sweep(bp.frequency, 0, f0, f1, T);
@@ -1060,7 +1185,7 @@ def('soldierDie', { dur: 0.9, variants: 4, var: 0.06, cap: 4, gain: 0.45, ref: 1
   src.frequency.setValueAtTime(K.p[0] * m, t);
   src.frequency.linearRampToValueAtTime(K.p[1] * m, t + D * 0.25);
   src.frequency.linearRampToValueAtTime(K.p[2] * m, t + D);
-  const lfo = g.osc('sine', rr(22, 32), t, D + 0.1);
+  const lfo = g.wt(rr(22, 32), t);
   const lg = g.g(K.p[1] * m * 0.025);
   lfo.connect(lg);
   lg.connect(src.frequency);
@@ -1085,17 +1210,17 @@ def('soldierDie', { dur: 0.9, variants: 4, var: 0.06, cap: 4, gain: 0.45, ref: 1
 });
 
 def('debris', { dur: 1.8, variants: 3, var: 0.08, cap: 4, gain: 0.6, ref: 15, reverb: 0.15, prio: 1 }, (g) => {
-  const hits = [];
+  const hits = [], thuds = [];
   const n = 5 + Math.floor(rnd() * 5);
   for (let k = 0; k < n; k++) {
     const tk = k === 0 ? 0.01 : rr(0.05, 1.4);
     const a = rr(0.25, 1) * Math.exp(-tk / 1.2);
-    hits.push({ t: tk, amp: a, strike: 0.7, parts: metal(rlog(380, 1800), [1, 1.49, 2.26, 3.03, 3.9], rr(0.06, 0.25)) });
-    // thud into the sand
-    tone(g, tk, { f0: rr(120, 180), f1: 70, sw: 0.02, tau: 0.02, level: a * 0.6 });
-    nhit(g, tk, { color: 'pink', pre: [g.lp(700)], tau: 0.015, level: a * 0.5 });
+    hits.push({ t: tk, amp: a, strike: 0.7, parts: metal(rlog(380, 1800), [1, 1.49, 2.26, 3.03, 3.9], rr(0.05, 0.16)) });
+    // dull thud into the sand
+    thuds.push({ t: tk, amp: a * 0.7, strike: 1.2, strikeTau: 0.004, parts: [[rr(110, 170), 0.02, 1], [rr(240, 320), 0.012, 0.4]] });
   }
   g.ch(g.buf(modalBuf(g, g.dur, hits)), g.hp(250), g.g(0.7), g.out);
+  g.ch(g.buf(modalBuf(g, g.dur, thuds)), g.lp(900), g.g(0.8), g.out);
   const d = jsBuf(g, (d, sr) => grainsInto(d, sr, { t0: 0.02, t1: 1.5, rate: (x) => 300 * Math.exp(-x / 0.5), amp: (x) => Math.exp(-x / 0.6), gmin: 0.0003, gmax: 0.0015, skew: 2.5 }));
   g.ch(g.buf(d), g.bp(2800, 0.7), g.g(0.35), g.out);
 });
@@ -1108,19 +1233,23 @@ def('rampDrop', { dur: 2.2, variants: 3, var: 0.05, cap: 3, gain: 0.9, ref: 30, 
   g.ch(g.buf(modalBuf(g, g.dur, rattle)), g.hp(900), g.out);
   // hinge creak
   const cr = g.osc('sawtooth', rr(80, 100), 0.02, ts);
-  const lf = g.osc('sine', rr(9, 14), 0.02, ts);
+  const lf = g.wt(rr(9, 14), 0.02);
   const lfg = g.g(12);
   lf.connect(lfg);
   lfg.connect(cr.frequency);
   g.layer(cr, [g.bp(rr(850, 1100), 4)], hold(0.02, 0.06, ts - 0.1, 0.08, 0.2));
   // slam: huge steel plate hitting the beach
-  const slam = [{ t: ts, amp: 1, strike: 0.6, strikeTau: 0.002, parts: metal(rr(52, 60), [1, 1.75, 2.9, 4.3, 6.8, 10.5, 16], 0.6) }];
-  slam.push({ t: ts, amp: 0.25, strike: 0, parts: metal(rr(1150, 1350), [1, 1.46, 2.08], 0.35) });
+  const slam = [{ t: ts, amp: 1, strike: 0.6, strikeTau: 0.002, parts: metal(rr(52, 60), [1, 1.75, 2.9, 4.3, 6.8, 10.5, 16], 0.28) }];
+  slam.push({ t: ts, amp: 0.22, strike: 0, parts: metal(rr(1150, 1350), [1, 1.46, 2.08], 0.2) });
   g.ch(g.buf(modalBuf(g, g.dur, slam)), g.g(0.8), g.out);
   tone(g, ts, { f0: 72, f1: 34, sw: 0.12, att: 0.002, tau: 0.16, level: 1.4, post: [g.ws(1.8)] });
   nhit(g, ts, { color: 'brown', pre: [g.lp(220)], att: 0.003, tau: 0.2, level: 1.0 });
   nhit(g, ts, { color: 'pink', pre: [g.bp(1500, 0.6)], att: 0.003, tau: 0.18, level: 0.45 });
-  const d = jsBuf(g, (d, sr) => bubblesInto(d, sr, { t0: ts + 0.02, t1: ts + 1.2, rate: (x) => 120 * Math.exp(-(x - ts) / 0.35), amp: () => 0.5, fmin: 900, fmax: 3500 }));
+  // surf spray thrown up by the ramp
+  const d = jsBuf(g, (d, sr) => {
+    grainsInto(d, sr, { t0: ts + 0.01, t1: ts + 1.2, rate: (x) => 2500 * Math.exp(-(x - ts) / 0.25), amp: (x) => Math.exp(-(x - ts) / 0.3), skew: 2 });
+    bubblesInto(d, sr, { t0: ts + 0.02, t1: ts + 0.8, rate: (x) => 150 * Math.exp(-(x - ts) / 0.2), amp: (x) => 0.4 * Math.exp(-(x - ts) / 0.25), fmin: 900, fmax: 3500 });
+  });
   g.ch(g.buf(d), g.hp(600), g.g(0.35), g.out);
 });
 
@@ -1128,20 +1257,40 @@ def('rampDrop', { dur: 2.2, variants: 3, var: 0.05, cap: 3, gain: 0.9, ref: 30, 
 // 3D LOOPS (sample-exact periodic)
 // ================================================================================================
 
-/** Periodic pulse train: count pulses per loop; shape(x seconds since pulse, k) -> sample. */
-function pulseTrain(g, count, len, shape) {
-  const d = new Float32Array(g.L);
-  const per = g.L / count;
-  const n = Math.ceil(len * g.sr);
+/**
+ * Periodic pulse train built from precomputed templates: `count` pulses per loop, pulse k uses
+ * templates[k % templates.length] scaled by amp(k). Wraps around the loop end.
+ */
+function pulseTrain(g, count, templates, amp) {
+  const L = g.L;
+  const b = newBuf(L, g.sr);
+  const d = b.getChannelData(0);
+  const per = L / count;
   for (let k = 0; k < count; k++) {
-    const i0 = Math.round(k * per);
-    const s = shape.bind(null);
-    for (let j = 0; j < n; j++) {
-      const i = (i0 + j) % g.L;
-      d[i] += s(j / g.sr, k);
+    const tm = templates[k % templates.length];
+    const a = amp(k);
+    let i = Math.round(k * per) % L;
+    for (let j = 0; j < tm.length; j++) {
+      d[i] += a * tm[j];
+      if (++i === L) i = 0;
     }
   }
-  return toBuf(d, g.sr);
+  return b;
+}
+/** Pulse template: decaying sine "thump" + decaying noise "crack", with a tiny fade-in. */
+function pulseTemplate(sr, len, f, tauT, crack, tauC) {
+  const n = Math.ceil(len * sr);
+  const d = new Float32Array(n);
+  const w = (TAU * f) / sr, kt = Math.exp(-1 / (tauT * sr)), kc = Math.exp(-1 / (tauC * sr));
+  const fin = Math.max(1, Math.round(0.0008 * sr));
+  let et = 1, ec = crack;
+  const p0 = (rnd() * NT.length) | 0;
+  for (let j = 0; j < n; j++) {
+    d[j] = (Math.sin(w * j) * et + NT[(p0 + j) & NT_MASK] * ec) * (j < fin ? j / fin : 1);
+    et *= kt;
+    ec *= kc;
+  }
+  return d;
 }
 
 def('jetLoop', { loop: true, len: 3, ref: 70, gain: 1, reverb: 0.15, cap: 4 }, (g) => {
@@ -1150,38 +1299,33 @@ def('jetLoop', { loop: true, len: 3, ref: 70, gain: 1, reverb: 0.15, cap: 4 }, (
   g.ch(g.lnoise(), g.bp(900, 0.6), amNode(g, 0.6, [g.pf(1.7), g.pf(3.3), g.pf(0.67)]), g.g(0.7), g.out); // turbulence
   g.ch(g.lnoise(), g.hp(5000), g.g(0.25), g.out); // hiss
   const wob = amNode(g, 0.3, [g.pf(0.67), g.pf(2.3)]);
-  wob.connect(g.out);
-  for (const [f, a] of [[2870, 0.05], [5740, 0.018], [1180, 0.03], [4310, 0.012]]) g.ch(g.osc('sine', g.pf(f)), g.g(a), wob);
+  g.ch(sinesBuf(g, [[2870, 0.05], [5740, 0.018], [1180, 0.03], [4310, 0.012]]), wob, g.out); // turbine whine
   const cr = jsBuf({ len: g.L, sr: g.sr }, (d, sr) => grainsInto(d, sr, { t0: 0, t1: g.Ls, rate: () => 70, amp: () => 1, gmin: 0.0003, gmax: 0.0012, skew: 3, wrap: true }));
   g.ch(g.buf(cr, 0, { loop: true }), g.lp(4500), g.hp(300), g.g(1.4), g.out); // exhaust crackle
 });
 
 function rotorLoop(g, o) {
-  const slap = pulseTrain(g, o.blades, 0.09, (x, k) => {
-    const a = (k % 2 ? o.alt : 1) * (0.95 + 0.1 * Math.sin(k * 2.1));
-    const thump = Math.sin(TAU * o.thumpF * x) * Math.exp(-x / o.thumpTau);
-    const crack = (rnd() * 2 - 1) * Math.exp(-x / o.crackTau);
-    return a * (thump + crack * o.crack) * (x < 0.0008 ? x / 0.0008 : 1);
-  });
-  g.ch(g.buf(slap, 0, { loop: true }), g.lp(o.slapLp), g.pk(o.thumpF * 1.2, 1, 4), g.g(o.slap), g.ws(1.5), g.out);
+  const tm = [0, 1, 2, 3].map(() => pulseTemplate(g.sr, 0.09, o.thumpF, o.thumpTau, o.crack, o.crackTau));
+  const slap = pulseTrain(g, o.blades, tm, (k) => (k % 2 ? o.alt : 1) * (0.95 + 0.1 * Math.sin(k * 2.1)));
+  g.ch(g.buf(slap, 0, { loop: true }), g.lp(o.slapLp), g.pk(o.thumpF * 1.2, 1, 4), g.pk(o.slapMid, 1.2, 6), g.g(o.slap), g.ws(1.5), g.out);
   // rotor wash, swelling with every blade pass
   const per = g.L / o.blades;
+  const envT = new Float32Array(Math.ceil(per) + 1);
+  for (let j = 0; j < envT.length; j++) envT[j] = 0.35 + 0.65 * Math.exp(-(j / per) * 5);
   const wash = new Float32Array(g.L);
-  for (let i = 0; i < g.L; i++) wash[i] = (rnd() * 2 - 1) * (0.35 + 0.65 * Math.exp(-((i % per) / per) * 5));
+  for (let i = 0; i < g.L; i++) wash[i] = (rnd() * 2 - 1) * envT[Math.floor(i % per)];
   g.ch(g.buf(toBuf(wash, g.sr), 0, { loop: true }), g.lp(o.washLp), g.hp(70), g.g(o.wash), g.out);
   g.ch(g.lnoise(), g.lp(o.rumbleLp), g.lp(o.rumbleLp), g.g(o.rumble), g.out);
   // tail rotor buzz
   g.ch(g.osc('sawtooth', g.pf(o.tail)), g.lp(600), g.g(o.tailA), g.out);
   // turbine whine(s) + gearbox hum
-  const wob = amNode(g, 0.25, [g.pf(0.8), g.pf(1.6)]);
-  wob.connect(g.out);
-  for (const [f, a] of o.whine) g.ch(g.osc('sine', g.pf(f)), g.g(a), wob);
+  g.ch(sinesBuf(g, o.whine), amNode(g, 0.25, [g.pf(0.8), g.pf(1.6)]), g.out);
 }
 
 def('cobraLoop', { loop: true, len: 2.5, ref: 45, gain: 1, reverb: 0.12, cap: 4 }, (g) => {
   // AH-1: 2-blade main rotor, 27 slaps in 2.5 s = 10.8 Hz
   rotorLoop(g, {
-    blades: 27, alt: 0.8, thumpF: 88, thumpTau: 0.013, crackTau: 0.0035, crack: 0.55, slapLp: 1800, slap: 1.0,
+    blades: 27, alt: 0.8, thumpF: 88, thumpTau: 0.013, crackTau: 0.004, crack: 0.9, slapLp: 3000, slapMid: 480, slap: 1.0,
     washLp: 900, wash: 0.5, rumbleLp: 130, rumble: 2.2, tail: 53.6, tailA: 0.05,
     whine: [[1620, 0.03], [3240, 0.012], [6480, 0.006], [210, 0.025]],
   });
@@ -1190,7 +1334,7 @@ def('cobraLoop', { loop: true, len: 2.5, ref: 45, gain: 1, reverb: 0.12, cap: 4 
 def('ch53Loop', { loop: true, len: 2, ref: 55, gain: 1, reverb: 0.12, cap: 3 }, (g) => {
   // CH-53: 7 blades, 42 slaps in 2 s = 21 Hz; heavier, less impulsive
   rotorLoop(g, {
-    blades: 42, alt: 0.92, thumpF: 64, thumpTau: 0.02, crackTau: 0.004, crack: 0.25, slapLp: 900, slap: 0.9,
+    blades: 42, alt: 0.92, thumpF: 64, thumpTau: 0.02, crackTau: 0.004, crack: 0.35, slapLp: 1200, slapMid: 320, slap: 0.9,
     washLp: 650, wash: 0.55, rumbleLp: 100, rumble: 3.5, tail: 46.5, tailA: 0.06,
     whine: [[1180, 0.025], [1183, 0.025], [2360, 0.01], [520, 0.015]],
   });
@@ -1199,10 +1343,8 @@ def('ch53Loop', { loop: true, len: 2, ref: 55, gain: 1, reverb: 0.12, cap: 3 }, 
 function trackedLoop(g, o) {
   // diesel exhaust pulses with per-cylinder jitter
   const jit = Array.from({ length: o.cyl }, () => rr(0.7, 1.15));
-  const eng = pulseTrain(g, o.fires, 0.05, (x, k) => {
-    const a = jit[k % o.cyl];
-    return a * (Math.sin(TAU * o.pulseF * x) * Math.exp(-x / 0.008) + (rnd() * 2 - 1) * 0.5 * Math.exp(-x / 0.003));
-  });
+  const tm = Array.from({ length: o.cyl }, () => pulseTemplate(g.sr, 0.05, o.pulseF, 0.008, 0.5, 0.003));
+  const eng = pulseTrain(g, o.fires, tm, (k) => jit[k % o.cyl] * rr(0.9, 1.1));
   g.ch(g.buf(eng, 0, { loop: true }), g.lp(o.engLp), g.ws(2.2), g.pk(o.pulseF, 1, 4), g.g(o.eng), g.out);
   // valve / mechanical clatter riding on the firing rhythm
   const clat = g.g(0);
@@ -1219,7 +1361,7 @@ function trackedLoop(g, o) {
   for (const [f, q, a] of o.squeal) g.ch(g.lnoise(), g.bp(f, q), amNode(g, 0.95, [g.pf(0.34), g.pf(1.0), g.pf(2.33)]), g.g(a), g.out);
   // ground rumble + engine whine
   g.ch(g.lnoise(), g.lp(75), g.lp(75), g.g(o.rumble), g.out);
-  g.ch(g.osc('sine', g.pf(o.whine)), g.g(0.02), g.out);
+  g.ch(sinesBuf(g, [[o.whine, 0.02]]), g.out);
 }
 
 def('tankLoop', { loop: true, len: 3, ref: 30, gain: 1, reverb: 0.1, cap: 6 }, (g) => {
@@ -1242,7 +1384,8 @@ def('apcLoop', { loop: true, len: 3, ref: 25, gain: 1, reverb: 0.1, cap: 6 }, (g
 
 def('lctLoop', { loop: true, len: 4, ref: 35, gain: 1, reverb: 0.1, cap: 6 }, (g) => {
   // slow 2-stroke marine diesel
-  const eng = pulseTrain(g, 96, 0.06, (x, k) => (k % 2 ? 0.85 : 1) * (Math.sin(TAU * 62 * x) * Math.exp(-x / 0.012) + (rnd() * 2 - 1) * 0.6 * Math.exp(-x / 0.004)));
+  const tm = [0, 1].map(() => pulseTemplate(g.sr, 0.06, 62, 0.012, 0.6, 0.004));
+  const eng = pulseTrain(g, 96, tm, (k) => (k % 2 ? 0.85 : 1) * rr(0.9, 1.1));
   g.ch(g.buf(eng, 0, { loop: true }), g.lp(320), g.ws(2), g.pk(62, 1, 4), g.g(1.3), g.out);
   g.ch(g.buf(eng, 0, { loop: true }), g.bp(900, 0.8), g.g(0.12), g.out); // exhaust burble
   // bow wash with swell
@@ -1263,7 +1406,7 @@ def('b52Loop', { loop: true, len: 4, ref: 150, gain: 1, reverb: 0.2, cap: 2 }, (
   g.ch(g.lnoise(), g.lp(650), amNode(g, 0.3, [g.pf(0.25), g.pf(0.5), g.pf(0.75)]), g.g(0.8), g.out);
   g.ch(g.lnoise(), g.bp(1400, 0.7), amNode(g, 0.4, [g.pf(0.5), g.pf(1.25)]), g.g(0.12), g.out);
   // 8 slightly detuned engines beating against each other
-  for (let k = 0; k < 8; k++) g.ch(g.osc('sine', g.pf(405 + k * 3.25 + rr(-1, 1))), g.g(0.01), g.out);
+  g.ch(sinesBuf(g, Array.from({ length: 8 }, (_, k) => [405 + k * 3.25 + rr(-1, 1), 0.01])), g.out);
   g.ch(g.osc('sawtooth', g.pf(96)), g.lp(300), g.g(0.03), g.out);
 });
 
@@ -1276,7 +1419,7 @@ def('propLoop', { loop: true, len: 4, ref: 60, gain: 1, reverb: 0.15, cap: 2 }, 
   g.ch(g.lnoise(), g.lp(500), g.g(0.5), g.out);
   g.ch(g.lnoise(), g.bp(1400, 0.8), g.g(0.12), g.out);
   g.ch(g.lnoise(), g.lp(140), g.g(1.6), g.out);
-  for (const f of [1650.25, 1651.5]) g.ch(g.osc('sine', g.pf(f)), g.g(0.018), g.out);
+  g.ch(sinesBuf(g, [[1650.25, 0.018], [1651.5, 0.018]]), g.out);
 });
 
 def('missileLoop', { loop: true, len: 2, ref: 20, gain: 1, reverb: 0.1, cap: 6 }, (g) => {
@@ -1337,7 +1480,7 @@ def('ambWind', { loop: true, len: 4, gain: 1, reverb: 0, bus: 'ambience' }, (g) 
   g.ch(g.lnoise(), g.lp(60), g.g(1.2), g.out);
 });
 
-def('ambBoom', { dur: 3.6, variants: 3, var: 0.1, cap: 3, gain: 0.8, reverb: 0, bus: 'ambience', prio: 0, post: rv({ rt: 2.5, mix: 0.3, damp: 0.6 }) }, (g) => {
+def('ambBoom', { dur: 3.4, variants: 2, var: 0.1, cap: 3, gain: 0.8, reverb: 0, bus: 'ambience', prio: 0, post: rv({ rt: 2.5, mix: 0.3, damp: 0.6 }) }, (g) => {
   const bus = g.g(1);
   bus.connect(g.out);
   const t = 0.01;
@@ -1345,7 +1488,7 @@ def('ambBoom', { dur: 3.6, variants: 3, var: 0.1, cap: 3, gain: 0.8, reverb: 0, 
   nhit(g, t, { color: 'brown', pre: [g.lp(170)], att: 0.015, tau: 0.5, level: 1.0, dest: bus });
   nhit(g, t, { color: 'pink', pre: [g.lp(700)], att: 0.005, tau: 0.05, level: 0.5, dest: bus });
   rumble(g, t, { f: 230, att: 0.1, tau: 0.9, level: 0.6, am: 0.5, dest: bus });
-  echo(g, bus, [[rr(0.4, 0.5), 260, 0.4], [rr(1.1, 1.3), 200, 0.3], [rr(1.9, 2.1), 160, 0.2]]);
+  echoPost(g, [[rr(0.4, 0.5), 260, 0.4], [rr(1.1, 1.3), 200, 0.3], [rr(1.9, 2.1), 160, 0.2]]);
 });
 
 // ================================================================================================
@@ -1361,7 +1504,7 @@ function brassNote(g, t, f, dur, { level = 0.25, bright = 2600, dest = g.out, vo
     o.connect(mix);
     oscs.push(o);
   }
-  const vib = g.osc('sine', rr(4.8, 5.6), t, dur + 0.3);
+  const vib = g.wt(rr(4.8, 5.6), t);
   const vg = g.g(0);
   vib.connect(vg);
   for (const o of oscs) vg.connect(o.frequency);
@@ -1400,57 +1543,96 @@ function cymbal(g, t, level = 0.3, tau = 1.0) {
 }
 const N = { C2: 65.41, C3: 130.81, Eb3: 155.56, F3: 174.61, G3: 196, C4: 261.63, D4: 293.66, E4: 329.63, G4: 392, C5: 523.25, E5: 659.25, G5: 783.99, C6: 1046.5 };
 
-def('levelStart', { dur: 2.4, variants: 1, var: 0, cap: 1, gain: 0.7, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 1.8, mix: 0.3 }) }, (g) => {
-  for (let i = 0; i < 6; i++) snare(g, 0.02 + i * 0.045, 0.12 + i * 0.05);
-  const b = 0.3;
-  [N.G4, N.C5, N.E5].forEach((f, i) => {
-    brassNote(g, b + i * 0.16, f, 0.12, { level: 0.3 });
-    snare(g, b + i * 0.16, 0.5);
+// Stings are compositions: each element (a snare hit, a chord) is pre-rendered once in its own
+// small context and mixed in JS, so no nodes sit idle waiting for a late start.
+const snareP = (C) => C.part(0.5, (g) => snare(g, 0, 1));
+
+def('levelStart', { dur: 2.4, variants: 1, var: 0, cap: 1, gain: 0.7, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 1.8, mix: 0.3 }) }, null);
+RECIPES.levelStart.compose = async (C) => {
+  const b = 0.3, h = b + 0.5;
+  const [sn, n1, n2, n3, chord, kk, cym] = await Promise.all([
+    snareP(C),
+    ...[N.G4, N.C5, N.E5].map((f) => C.part(0.5, (g) => brassNote(g, 0, f, 0.12, { level: 0.3 }))),
+    C.part(1.4, (g) => {
+      brassNote(g, 0, N.G5, 1.0, { level: 0.34, bright: 3200 });
+      brassNote(g, 0, N.C5, 1.0, { level: 0.22 });
+      brassNote(g, 0, N.E4, 1.0, { level: 0.2, bright: 1800 });
+      brassNote(g, 0, N.C3, 1.0, { level: 0.2, bright: 1200 });
+    }),
+    C.part(1.2, (g) => kick(g, 0, 1.0)),
+    C.part(1.6, (g) => cymbal(g, 0, 0.3, 0.8)),
+  ]);
+  for (let i = 0; i < 6; i++) C.mix(sn, 0.02 + i * 0.045, 0.12 + i * 0.05);
+  [n1, n2, n3].forEach((x, i) => {
+    C.mix(x, b + i * 0.16);
+    C.mix(sn, b + i * 0.16, 0.5);
   });
-  const h = b + 0.5;
-  brassNote(g, h, N.G5, 1.0, { level: 0.34, bright: 3200 });
-  brassNote(g, h, N.C5, 1.0, { level: 0.22 });
-  brassNote(g, h, N.E4, 1.0, { level: 0.2, bright: 1800 });
-  brassNote(g, h, N.C3, 1.0, { level: 0.2, bright: 1200 });
-  kick(g, h, 1.0);
-  snare(g, h, 0.6);
-  cymbal(g, h, 0.3, 0.8);
-});
+  C.mix(chord, h);
+  C.mix(kk, h);
+  C.mix(sn, h, 0.6);
+  C.mix(cym, h);
+};
 
-def('levelComplete', { dur: 3.2, variants: 1, var: 0, cap: 1, gain: 0.7, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 1.8, mix: 0.3 }) }, (g) => {
+def('levelComplete', { dur: 3.2, variants: 1, var: 0, cap: 1, gain: 0.7, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 1.8, mix: 0.3 }) }, null);
+RECIPES.levelComplete.compose = async (C) => {
   const seq = [[N.G4, 0.0, 0.1], [N.C5, 0.12, 0.1], [N.E5, 0.24, 0.1], [N.G5, 0.36, 0.2], [N.E5, 0.62, 0.1], [N.G5, 0.76, 0.1]];
-  for (const [f, t, d] of seq) {
-    brassNote(g, t + 0.02, f, d, { level: 0.3 });
-    snare(g, t + 0.02, 0.4);
-  }
   const h = 0.94;
-  brassNote(g, h, N.C6, 1.3, { level: 0.3, bright: 3600 });
-  brassNote(g, h, N.G5, 1.3, { level: 0.22 });
-  brassNote(g, h, N.E5, 1.3, { level: 0.2 });
-  brassNote(g, h, N.C4, 1.3, { level: 0.22, bright: 1500 });
-  brassNote(g, h, N.C3, 1.3, { level: 0.2, bright: 1000 });
-  kick(g, h, 1.0);
-  timp(g, h, 65.4, 0.8);
-  cymbal(g, h, 0.35, 1.2);
-  for (let i = 0; i < 8; i++) snare(g, h + 0.9 + i * 0.03, 0.1 + i * 0.03);
-  kick(g, h + 1.15, 0.8);
-  cymbal(g, h + 1.15, 0.2, 0.6);
-});
+  const [sn, chord, kk, kk2, tp, cym, cym2, ...notes] = await Promise.all([
+    snareP(C),
+    C.part(1.8, (g) => {
+      brassNote(g, 0, N.C6, 1.3, { level: 0.3, bright: 3600 });
+      brassNote(g, 0, N.G5, 1.3, { level: 0.22 });
+      brassNote(g, 0, N.E5, 1.3, { level: 0.2 });
+      brassNote(g, 0, N.C4, 1.3, { level: 0.22, bright: 1500 });
+      brassNote(g, 0, N.C3, 1.3, { level: 0.2, bright: 1000 });
+    }),
+    C.part(1.2, (g) => kick(g, 0, 1.0)),
+    C.part(1.0, (g) => kick(g, 0, 0.8)),
+    C.part(2.3, (g) => timp(g, 0, 65.4, 0.8)),
+    C.part(2.3, (g) => cymbal(g, 0, 0.35, 1.2)),
+    C.part(1.2, (g) => cymbal(g, 0, 0.2, 0.6)),
+    ...seq.map(([f, , d]) => C.part(d + 0.4, (g) => brassNote(g, 0, f, d, { level: 0.3 }))),
+  ]);
+  seq.forEach(([, t], i) => {
+    C.mix(notes[i], t + 0.02);
+    C.mix(sn, t + 0.02, 0.4);
+  });
+  C.mix(chord, h);
+  C.mix(kk, h);
+  C.mix(tp, h);
+  C.mix(cym, h);
+  for (let i = 0; i < 8; i++) C.mix(sn, h + 0.9 + i * 0.03, 0.1 + i * 0.03);
+  C.mix(kk2, h + 1.15);
+  C.mix(cym2, h + 1.15);
+};
 
-def('gameOver', { dur: 3.8, variants: 1, var: 0, cap: 1, gain: 0.75, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 2.2, mix: 0.35 }) }, (g) => {
-  brassNote(g, 0.02, N.G3, 0.28, { level: 0.3, bright: 1400 });
-  brassNote(g, 0.02, N.D4, 0.28, { level: 0.22, bright: 1400 });
-  timp(g, 0.02, 98, 0.8);
-  brassNote(g, 0.55, N.F3, 0.28, { level: 0.3, bright: 1300 });
-  brassNote(g, 0.55, N.C4, 0.28, { level: 0.22, bright: 1300 });
-  timp(g, 0.55, 87.3, 0.8);
+def('gameOver', { dur: 3.8, variants: 1, var: 0, cap: 1, gain: 0.75, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 2.2, mix: 0.35 }) }, null);
+RECIPES.gameOver.compose = async (C) => {
   const h = 1.1;
-  for (const [f, l] of [[N.C3, 0.3], [N.Eb3, 0.24], [N.G3, 0.22], [N.C2, 0.26], [N.C4, 0.14]]) brassNote(g, h, f, 1.6, { level: l, bright: 1100 });
-  timp(g, h, 65.4, 1.0);
-  kick(g, h, 1.0);
-  tone(g, h, { f0: 55, f1: 32, sw: 0.4, att: 0.005, tau: 0.8, level: 0.8 });
-  cymbal(g, h, 0.12, 1.5);
-});
+  const [c1, c2, c3] = await Promise.all([
+    C.part(2.2, (g) => {
+      brassNote(g, 0, N.G3, 0.28, { level: 0.3, bright: 1400 });
+      brassNote(g, 0, N.D4, 0.28, { level: 0.22, bright: 1400 });
+      timp(g, 0, 98, 0.8);
+    }),
+    C.part(2.2, (g) => {
+      brassNote(g, 0, N.F3, 0.28, { level: 0.3, bright: 1300 });
+      brassNote(g, 0, N.C4, 0.28, { level: 0.22, bright: 1300 });
+      timp(g, 0, 87.3, 0.8);
+    }),
+    C.part(2.7, (g) => {
+      for (const [f, l] of [[N.C3, 0.3], [N.Eb3, 0.24], [N.G3, 0.22], [N.C2, 0.26], [N.C4, 0.14]]) brassNote(g, 0, f, 1.6, { level: l, bright: 1100 });
+      timp(g, 0, 65.4, 1.0);
+      kick(g, 0, 1.0);
+      tone(g, 0, { f0: 55, f1: 32, sw: 0.4, att: 0.005, tau: 0.8, level: 0.8 });
+      cymbal(g, 0, 0.12, 1.5);
+    }),
+  ]);
+  // the first two hits ring on under the next ones
+  C.mix(c1, 0.02);
+  C.mix(c2, 0.55);
+  C.mix(c3, h);
+};
 
 def('siren', { dur: 6.6, variants: 1, var: 0, cap: 1, gain: 0.55, reverb: 0, bus: 'ui', prio: 4, post: rv({ rt: 2.6, mix: 0.3, damp: 0.5 }) }, (g) => {
   const T = 6.2;
@@ -1480,7 +1662,7 @@ def('siren', { dur: 6.6, variants: 1, var: 0, cap: 1, gain: 0.55, reverb: 0, bus
   const env = g.g(0);
   env.gain.setValueCurveAtTime(amp, 0, T);
   g.ch(mix, g.lp(1800, 0.8), g.pk(900, 1, 3), env, g.ws(1.3), g.out);
-  echo(g, env, [[0.32, 1200, 0.3], [0.71, 800, 0.18]]);
+  echoPost(g, [[0.32, 1200, 0.3], [0.71, 800, 0.18]]);
 });
 
 def('radio', { dur: 0.6, variants: 3, var: 0.02, cap: 2, gain: 0.5, reverb: 0, bus: 'ui', prio: 4 }, (g) => {
@@ -1531,42 +1713,46 @@ export const SOUND_META = Object.fromEntries(
   })
 );
 
+/** Rational tanh approximation (exact at ±3, monotonic), ~10x cheaper than Math.tanh. */
+const ftanh = (x) => (x <= -3 ? -1 : x >= 3 ? 1 : (x * (27 + x * x)) / (27 + 9 * x * x));
+
+/** DC-block, optional soft-clip "punch", trim trailing silence, fade edges, normalize -> AudioBuffer. */
 function finishOneShot(d, sr, R) {
-  // DC blocker (~8 Hz one-pole highpass)
   const a = 1 - (TAU * 8) / sr;
-  let x1 = 0, y1 = 0;
+  let x1 = 0, y1 = 0, pk = 0;
   for (let i = 0; i < d.length; i++) {
     const x = d[i];
     y1 = x - x1 + a * y1;
     x1 = x;
     d[i] = y1;
+    const m = y1 < 0 ? -y1 : y1;
+    if (m > pk) pk = m;
   }
-  let pk = 0;
-  for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i]));
-  if (!(pk > 1e-9)) return d;
+  if (!(pk > 1e-9)) return toBuf(d, sr);
   if (R.punch > 0) {
-    const k = R.punch, inv = 1 / pk, tk = Math.tanh(k);
-    for (let i = 0; i < d.length; i++) d[i] = Math.tanh(d[i] * inv * k) / tk;
+    const inv = R.punch / pk, tk = 1 / ftanh(R.punch);
+    for (let i = 0; i < d.length; i++) d[i] = ftanh(d[i] * inv) * tk;
     pk = 1;
   }
-  // trim trailing silence (-66 dB re peak), fade the last stretch
-  const thr = pk * 0.0005;
+  const thr = pk * 0.0005; // -66 dB re peak
   let end = d.length - 1;
   while (end > 0 && Math.abs(d[end]) < thr) end--;
-  end = Math.min(d.length, end + Math.round(0.01 * sr));
-  const out = d.slice(0, Math.max(end, 64));
-  const fin = Math.min(8, out.length);
-  for (let i = 0; i < fin; i++) out[i] *= i / fin;
-  const fo = Math.min(Math.round(0.05 * sr), Math.floor(out.length * 0.15));
-  for (let i = 0; i < fo; i++) out[out.length - 1 - i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / fo);
-  let p2 = 0;
-  for (let i = 0; i < out.length; i++) p2 = Math.max(p2, Math.abs(out[i]));
-  const k = R.peak / p2;
-  for (let i = 0; i < out.length; i++) out[i] *= k;
-  return out;
+  end = Math.max(64, Math.min(d.length, end + Math.round(0.01 * sr)));
+  const k = R.peak / pk;
+  const fin = 8;
+  const fo = Math.min(Math.round(0.05 * sr), Math.floor(end * 0.15));
+  for (let i = 0; i < end; i++) {
+    let v = d[i] * k;
+    if (i < fin) v *= i / fin;
+    const r = end - 1 - i;
+    if (r < fo) v *= 0.5 - 0.5 * Math.cos((Math.PI * r) / fo);
+    d[i] = v;
+  }
+  return toBuf(d.subarray(0, end), sr);
 }
 
-function finishLoop(d, R) {
+/** Remove the mean and normalize a (periodic) loop -> AudioBuffer. */
+function finishLoop(d, sr, R) {
   let m = 0;
   for (let i = 0; i < d.length; i++) m += d[i];
   m /= d.length;
@@ -1574,7 +1760,7 @@ function finishLoop(d, R) {
   for (let i = 0; i < d.length; i++) pk = Math.max(pk, Math.abs(d[i] - m));
   const k = pk > 1e-9 ? R.peak / pk : 0;
   for (let i = 0; i < d.length; i++) d[i] = (d[i] - m) * k;
-  return d;
+  return toBuf(d, sr);
 }
 
 async function renderJob(S, R, v, stats) {
@@ -1583,9 +1769,33 @@ async function renderJob(S, R, v, stats) {
   const sr = S.sr;
   const t0 = performance.now();
   let t1 = t0, t2 = t0, result;
-  if (R.js) {
+  if (R.compose) {
+    // pre-render short elements in their own small contexts (all nodes busy, none idling while
+    // waiting for a late start), then mix them in JS
+    const d = new Float32Array(Math.ceil(R.dur * sr));
+    const part = (dur, build) => {
+      rnd = rng;
+      const g = new Graph(S, Math.ceil(dur * sr));
+      build(g);
+      return g.c.startRendering().then((r) => {
+        const x = r.getChannelData(0);
+        if (g.echoTaps.length) echoJS(x, sr, g.echoTaps);
+        return x;
+      });
+    };
+    const mix = (x, t, gain = 1) => {
+      const i0 = Math.round(t * sr);
+      const m = Math.min(x.length, d.length - i0);
+      for (let i = 0; i < m; i++) d[i0 + i] += x[i] * gain;
+    };
+    await R.compose({ part, mix, sr, v });
+    t1 = t2 = performance.now();
+    rnd = rng;
+    if (R.post) R.post(d, sr);
+    result = finishOneShot(d, sr, R);
+  } else if (R.js) {
     const d = R.js(sr, v);
-    result = toBuf(R.loop || R.loopable ? finishLoop(d, R) : finishOneShot(d, sr, R), sr);
+    result = R.loop || R.loopable ? finishLoop(d, sr, R) : finishOneShot(d, sr, R);
     t1 = t2 = performance.now();
   } else if (R.loop) {
     const L = Math.round(R.len * sr);
@@ -1600,18 +1810,18 @@ async function renderJob(S, R, v, stats) {
     t1 = performance.now();
     const rendered = await g.c.startRendering();
     t2 = performance.now();
-    const d = rendered.getChannelData(0).slice(settle, settle + L);
-    result = toBuf(finishLoop(d, R), sr);
+    result = finishLoop(rendered.getChannelData(0).subarray(settle, settle + L), sr, R);
   } else {
     const g = new Graph(S, Math.ceil(R.dur * sr));
     R.build(g, v);
     t1 = performance.now();
     const rendered = await g.c.startRendering();
     t2 = performance.now();
-    const d = rendered.getChannelData(0).slice();
+    const d = rendered.getChannelData(0); // processed in place, then copied trimmed
     rnd = rng;
+    if (g.echoTaps.length) echoJS(d, sr, g.echoTaps);
     if (R.post) R.post(d, sr);
-    result = toBuf(finishOneShot(d, sr, R), sr);
+    result = finishOneShot(d, sr, R);
   }
   if (stats) {
     const e = (stats[R.name] ||= { build: 0, render: 0, post: 0 });

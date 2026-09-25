@@ -148,7 +148,7 @@ function panelTexture(seed = 5, lineDark = 150) {
       }
     }
     // rivet rows next to seams
-    ctx.fillStyle = 'rgba(120,120,120,0.55)';
+    ctx.fillStyle = 'rgba(120,120,120,0.3)';
     for (const cx of cols) for (let yy = 4; yy < h; yy += 9) ctx.fillRect(cx + 5, yy, 1.5, 1.5);
     // a few darker access panels
     for (let i = 0; i < 6; i++) {
@@ -161,25 +161,20 @@ function panelTexture(seed = 5, lineDark = 150) {
 
 /** Camouflage: SEA scheme (tan / medium green / dark green) on top; the strip v<0.07 is underside light grey. */
 function jetCamoTexture() {
-  const nA = makeFbm(21, 3, 4, 0.45), nB = makeFbm(22, 3, 4, 0.45), nD = makeFbm(23, 32, 2);
-  const tan = [158, 128, 92], green = [88, 96, 62], dark = [52, 60, 42], grey = [206, 206, 198];
+  const nA = makeFbm(21, 5, 4, 0.45), nB = makeFbm(22, 5, 4, 0.45), nD = makeFbm(23, 32, 2);
+  const tan = [146, 118, 86], green = [86, 94, 60], dark = [50, 57, 40], grey = [196, 197, 190];
   return makeCanvasTexture(1024, 1024, (ctx, w, h) => {
     fillPixels(ctx, w, h, (u, v) => {
       const detail = (nD(u, v) - 0.5) * 16;
       // canvas y=0 is top; texture v = 1 - y/h. Reserve bottom 7% (v<0.07) as underside.
       if (v > 0.93) return [grey[0] + detail, grey[1] + detail, grey[2] + detail];
       const a = nA(u, v), b = nB(u, v);
-      const tTan = smooth(0.47, 0.5, a);
-      const tDark = smooth(0.5, 0.53, b);
+      const tTan = smooth(0.54, 0.57, a);
+      const tDark = smooth(0.49, 0.52, b);
       const gcol = [mix(green[0], dark[0], tDark), mix(green[1], dark[1], tDark), mix(green[2], dark[2], tDark)];
       const c = [mix(gcol[0], tan[0], tTan), mix(gcol[1], tan[1], tTan), mix(gcol[2], tan[2], tTan)];
       return [clamp255(c[0] + detail), clamp255(c[1] + detail), clamp255(c[2] + detail)];
     });
-    // subtle panel lines over the whole thing
-    const rnd = mulberry32(77);
-    ctx.fillStyle = 'rgba(0,0,0,0.18)';
-    for (let i = 0; i < 26; i++) ctx.fillRect(rnd() * w, 0, 1.5, h * 0.93);
-    for (let i = 0; i < 22; i++) ctx.fillRect(0, rnd() * h * 0.93, w, 1.5);
   });
 }
 
@@ -244,14 +239,14 @@ function planksTexture(base = [92, 96, 58], seed = 3) {
 function crateFaceTexture(kind) {
   const n = makeFbm(kind === 'ammo' ? 51 : 52, 2, 5);
   return makeCanvasTexture(512, 512, (ctx, w, h) => {
-    const base = [96, 100, 60];
+    const base = [98, 100, 66];
     const plank = 4;
     fillPixels(ctx, w, h, (u, v) => {
       const pi = Math.floor(v * plank);
-      const grain = Math.sin((u * 26 + n(u * 0.5 + pi * 0.3, v * 3) * 9) * 3) * 0.5 + 0.5;
+      const grain = Math.sin((u * 40 + n(u * 0.3 + pi * 0.3, v * 2) * 4) * 2) * 0.5 + 0.5;
       const e = Math.min(v * plank - pi, 1 - (v * plank - pi));
       const gap = e < 0.02 ? 0.35 : e < 0.05 ? 0.8 : 1;
-      const l = (0.85 + grain * 0.1 + (n(u, v) - 0.5) * 0.25) * gap;
+      const l = (0.88 + grain * 0.06 + (n(u, v) - 0.5) * 0.22) * gap;
       return [clamp255(base[0] * l), clamp255(base[1] * l), clamp255(base[2] * l)];
     });
     const stencilWear = (alpha) => {
@@ -332,6 +327,22 @@ function perforatedTexture() {
       ctx.beginPath(); ctx.ellipse(cx % w, cy, w / nx * 0.3, h / ny * 0.3, 0, 0, Math.PI * 2); ctx.fill();
     }
   }, { srgb: false });
+}
+
+/** Burnt / sooted metal for wrecks: near-black with ash-grey and rust-brown blotches. */
+function charredTexture() {
+  const n1 = makeFbm(81, 4, 5), n2 = makeFbm(82, 16, 3);
+  return makeCanvasTexture(512, 512, (ctx, w, h) => {
+    fillPixels(ctx, w, h, (u, v) => {
+      const a = n1(u, v), b = n2(u, v);
+      let r = 20 + a * 18, g = 19 + a * 16, bl = 18 + a * 14;
+      const rust = smooth(0.64, 0.74, b);
+      r = mix(r, 52, rust * 0.6); g = mix(g, 32, rust * 0.6); bl = mix(bl, 22, rust * 0.6);
+      const ash = smooth(0.66, 0.8, a);
+      r = mix(r, 64, ash * 0.5); g = mix(g, 62, ash * 0.5); bl = mix(bl, 58, ash * 0.5);
+      return [clamp255(r), clamp255(g), clamp255(bl)];
+    });
+  });
 }
 
 function concreteFallback() {
@@ -465,8 +476,8 @@ export function createMaterials(tex = {}) {
   const cc = validSet(tex && tex.concrete);
 
   const worn = wornPaintTexture();
-  const panels = panelTexture(5, 150);
-  const panelsDark = panelTexture(9, 120);
+  const panels = panelTexture(5, 178);
+  const panelsDark = panelTexture(9, 196);
 
   const std = (p) => new THREE.MeshStandardMaterial(p);
 
@@ -491,15 +502,18 @@ export function createMaterials(tex = {}) {
   if (!sandTex) m.sandCamo.color = srgb(170, 146, 104);
 
   m.navyGrey = std({ color: srgb(126, 134, 140), map: panelsDark, bumpMap: panelsDark, bumpScale: 0.5, roughness: 0.62, metalness: 0.3 });
+  m.antifoul = std({ color: srgb(92, 42, 34), map: worn, roughness: 0.8, metalness: 0.1 });
   m.deckGrey = std({ color: srgb(88, 92, 94), map: worn, bumpMap: worn, bumpScale: 1.2, roughness: 0.88, metalness: 0.15 });
   m.aircraftGrey = std({ color: srgb(178, 183, 186), map: panels, bumpMap: panels, bumpScale: 0.35, roughness: 0.5, metalness: 0.28 });
   const camo = jetCamoTexture();
-  m.jetCamo = std({ color: camo ? 0xffffff : srgb(110, 112, 78), map: camo, bumpMap: panels, bumpScale: 0.25, roughness: 0.58, metalness: 0.18 });
+  const camoBump = panels ? panels.clone() : null;
+  if (camoBump) camoBump.repeat.set(6, 6);
+  m.jetCamo = std({ color: camo ? 0xffffff : srgb(110, 112, 78), map: camo, bumpMap: camoBump, bumpScale: 0.3, roughness: 0.6, metalness: 0.15 });
   m.bomberGrey = std({ color: srgb(152, 157, 160), map: panels, bumpMap: panels, bumpScale: 0.35, roughness: 0.42, metalness: 0.55 });
   m.bomberDark = std({ color: srgb(40, 42, 44), map: panels, roughness: 0.6, metalness: 0.3 });
   m.helicopterGreen = std({ color: srgb(70, 78, 56), map: panels, bumpMap: panels, bumpScale: 0.3, roughness: 0.66, metalness: 0.18 });
-  m.darkMetal = std({ color: srgb(58, 60, 62), map: worn, roughness: 0.36, metalness: 0.85 });
-  m.blackMetal = std({ color: srgb(24, 25, 26), map: worn, roughness: 0.5, metalness: 0.6 });
+  m.darkMetal = std({ color: srgb(112, 114, 117), map: worn, roughness: 0.42, metalness: 0.85 });
+  m.blackMetal = std({ color: srgb(46, 47, 49), map: worn, roughness: 0.55, metalness: 0.55 });
   m.brass = std({ color: srgb(196, 150, 70), roughness: 0.3, metalness: 1.0 });
   m.rubber = std({ color: srgb(28, 28, 28), roughness: 0.92, metalness: 0.0 });
   const tr = trackTexture();
@@ -514,7 +528,8 @@ export function createMaterials(tex = {}) {
   const blurA = rotorBlurTexture();
   m.rotorBlur = std({ color: srgb(34, 36, 38), transparent: true, opacity: 0.25, alphaMap: blurA, depthWrite: false, side: THREE.DoubleSide, roughness: 0.6, metalness: 0.2 });
   m.engineGlow = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.0, 0.42, 0.1).multiplyScalar(4.0), toneMapped: false });
-  m.charred = std({ color: srgb(14, 13, 12), roughness: 1.0, metalness: 0.0 });
+  const charTex = charredTexture();
+  m.charred = std({ color: charTex ? 0xffffff : srgb(14, 13, 12), map: charTex, bumpMap: charTex, bumpScale: 1.5, roughness: 1.0, metalness: 0.0 });
 
   // soldier
   m.uniform = std({ color: srgb(88, 96, 62), roughness: 0.95, metalness: 0 });
@@ -542,7 +557,7 @@ export function createMaterials(tex = {}) {
   const burlap = burlapTexture();
   m.sandbag = std({ color: burlap ? 0xffffff : srgb(180, 158, 112), map: burlap, bumpMap: burlap, bumpScale: 2.5, roughness: 0.97, metalness: 0 });
   if (rm) {
-    m.hedgehog = std({ map: rm.map, normalMap: rm.normalMap, roughnessMap: rm.roughnessMap, roughness: rm.roughnessMap ? 1.6 : 0.8, metalness: 0.45, color: srgb(200, 180, 170) });
+    m.hedgehog = std({ map: rm.map, normalMap: rm.normalMap, roughnessMap: rm.roughnessMap, roughness: rm.roughnessMap ? 1.7 : 0.8, metalness: 0.4, color: srgb(150, 128, 118) });
   } else {
     const rust = rustFallback();
     m.hedgehog = std({ color: rust ? 0xffffff : srgb(120, 64, 34), map: rust, bumpMap: rust, bumpScale: 1, roughness: 0.85, metalness: 0.4 });

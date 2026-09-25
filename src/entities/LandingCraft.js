@@ -137,10 +137,11 @@ export class LandingCraft extends Entity {
         if (this.stateTime > 7) this.setState('leave');
         break;
       case 'leave': {
-        const want = Math.PI + Math.atan2(-this.pos.x * 0.2, 1);
+        // head back out to sea, fanning slightly away from the centre
+        const want = Math.atan2(Math.sign(this.pos.x || 1) * 0.3, -1);
         this.yaw += clamp(wrapAngle(want - this.yaw), -0.3 * dt, 0.3 * dt);
         this.forward(dt, Math.min(11, 2 + this.stateTime * 1.5));
-        if (this.pos.z < shoreZ(this.pos.x) - 380) this.withdraw();
+        if (this.pos.z < shoreZ(this.pos.x) - 380 || this.stateTime > 90) this.withdraw();
         break;
       }
     }

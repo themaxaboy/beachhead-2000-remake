@@ -27,7 +27,7 @@ export const CONFIG = {
   rules: {
     shieldCarryover: false, // shield resets each mission
     overtime: 'bombers', // after the time limit bomber raids keep coming until the beach is clear
-    overtimeRaidInterval: 25,
+    overtimeRaidInterval: 40,
     timeBonusPerSecond: 5,
     shieldBonus: 20,
     levelBonus: 500,
@@ -50,8 +50,8 @@ export const CONFIG = {
     urgentMax: 25,
     minGap: 30,
     ammoBullets: 300,
-    ammoMissiles: 2,
-    ammoProjectiles: 2,
+    ammoMissiles: 3,
+    ammoProjectiles: 3,
     shield: 25,
   },
 
@@ -62,9 +62,9 @@ export const CONFIG = {
   },
 
   timeOfDay: {
-    day: { hdri: 'day_2k.hdr', exposure: 0.95, sunAzimuth: 145 * DEG, sunIntensity: 3.2, fogDensity: 0.00045, water: 0x1b4a5a, minElevation: 28 * DEG, hemi: 0.35 },
-    dusk: { hdri: 'dusk_2k.hdr', exposure: 0.9, sunAzimuth: -28 * DEG, sunIntensity: 2.4, fogDensity: 0.0007, water: 0x223344, minElevation: 7 * DEG, hemi: 0.3 },
-    night: { hdri: 'night_1k.hdr', exposure: 1.6, sunAzimuth: 22 * DEG, sunIntensity: 0.55, fogDensity: 0.0009, water: 0x0b1a26, minElevation: 16 * DEG, hemi: 0.18, flares: true },
+    day: { hdri: 'day_2k.hdr', exposure: 0.95, skyMedian: 0.32, sunAzimuth: 145 * DEG, sunIntensity: 3.2, fogDensity: 0.00045, water: 0x1d5f70, minElevation: 28 * DEG, hemi: 0.35 },
+    dusk: { hdri: 'dusk_2k.hdr', exposure: 1.0, skyMedian: 0.2, sunColor: 0xffb070, sunAzimuth: -28 * DEG, sunIntensity: 2.2, fogDensity: 0.0007, water: 0x223344, minElevation: 7 * DEG, hemi: 0.3 },
+    night: { hdri: 'night_1k.hdr', exposure: 1.15, skyMedian: 0.022, envBoost: 1.6, elevation: 32 * DEG, sunColor: 0x9fb6ff, sunAzimuth: 22 * DEG, sunIntensity: 0.45, fogDensity: 0.0009, water: 0x0b1a26, minElevation: 16 * DEG, hemi: 0.1, flares: true },
   },
 };
 

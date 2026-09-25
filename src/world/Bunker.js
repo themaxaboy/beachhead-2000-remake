@@ -21,11 +21,12 @@ export class Bunker {
     this.shield = Math.min(this.max, this.shield + amount);
   }
 
-  damage(amount, from) {
+  damage(amount, from, kind = 'other') {
     const game = this.game;
     if (this.shield <= 0 || game.state !== 'playing') return;
     if (!this.invulnerable) this.shield = Math.max(0, this.shield - amount);
     game.stats.damageTaken += amount;
+    game.stats.damageBy[kind] = (game.stats.damageBy[kind] || 0) + amount;
     const r = game.renderer.damage;
     r.uFlash.value = Math.min(1, r.uFlash.value + Math.min(0.7, amount * 0.12 + 0.05));
     game.effects.addTrauma(Math.min(0.6, 0.06 * amount + 0.02));

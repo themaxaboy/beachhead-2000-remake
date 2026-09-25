@@ -16,7 +16,7 @@ const BUDGET_MB = 25;
 const MANIFEST = [
   { id: 'kloofendal_48d_partly_cloudy_puresky', kind: 'hdri', res: '2k', as: 'day' },
   { id: 'qwantani_dusk_2_puresky', kind: 'hdri', res: '2k', as: 'dusk' },
-  { id: 'qwantani_moonrise_puresky', kind: 'hdri', res: '1k', as: 'night' },
+  { id: 'qwantani_night_puresky', kind: 'hdri', res: '1k', as: 'night' },
   { id: 'coast_sand_01', kind: 'texture', res: '1k', maps: ['Diffuse', 'nor_gl'] },
   { id: 'damp_beach_sand', kind: 'texture', res: '1k', maps: ['Diffuse', 'nor_gl'] },
   { id: 'concrete', kind: 'texture', res: '1k', maps: ['Diffuse', 'nor_gl', 'Rough'] },

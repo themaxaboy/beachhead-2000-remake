@@ -54,9 +54,9 @@ export class Props {
     const top = heightAt(0, 0);
     // Concrete turret ring the gun sits in.
     const ringShape = new THREE.Shape();
-    ringShape.absarc(0, 0, 3.4, 0, Math.PI * 2, false);
+    ringShape.absarc(0, 0, 3.1, 0, Math.PI * 2, false);
     const hole = new THREE.Path();
-    hole.absarc(0, 0, 2.6, 0, Math.PI * 2, true);
+    hole.absarc(0, 0, 2.2, 0, Math.PI * 2, true);
     ringShape.holes.push(hole);
     const ringGeo = new THREE.ExtrudeGeometry(ringShape, {
       depth: 1.7,
@@ -68,13 +68,14 @@ export class Props {
     });
     ringGeo.rotateX(-Math.PI / 2);
     const concrete = mats.concrete;
-    const ring = new THREE.Mesh(ringGeo, concrete);
-    ring.position.y = top - 0.4;
+    // painted steel turret ring the gun traverses on
+    const ring = new THREE.Mesh(ringGeo, mats.olive2 || concrete);
+    ring.position.y = top - 1.0;
     ring.castShadow = ring.receiveShadow = true;
     this.group.add(ring);
 
     // Low bunker walls / embrasure blocks around the mound top.
-    const block = new THREE.BoxGeometry(2.4, 1.2, 1.1);
+    const block = new THREE.BoxGeometry(2.4, 0.9, 1.1);
     const blocks = [];
     for (let i = 0; i < 16; i++) {
       const a = (i / 16) * Math.PI * 2 + 0.1;
@@ -82,7 +83,7 @@ export class Props {
       const x = Math.sin(a) * r;
       const z = -Math.cos(a) * r;
       const m = new THREE.Matrix4().compose(
-        new THREE.Vector3(x, top + 0.2, z),
+        new THREE.Vector3(x, top + 0.05, z),
         new THREE.Quaternion().setFromAxisAngle(_up, -a),
         new THREE.Vector3(1, rng.range(0.8, 1.1), 1),
       );

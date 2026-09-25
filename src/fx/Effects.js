@@ -15,14 +15,14 @@ const _up = new THREE.Vector3(0, 1, 0);
 const _euler = new THREE.Euler();
 const _spin = new THREE.Quaternion();
 
-const FIRE0 = [7, 3.6, 1.2];
-const FIRE1 = [1.4, 0.3, 0.05];
+const FIRE0 = [4.2, 2.0, 0.6];
+const FIRE1 = [0.9, 0.22, 0.04];
 const SMOKE_DARK = [0.09, 0.085, 0.08];
 const SMOKE_MID = [0.32, 0.31, 0.3];
 const SAND = [0.78, 0.69, 0.55];
 const SAND_DARK = [0.45, 0.38, 0.3];
 const WATER = [0.9, 0.94, 0.97];
-const SPARK = [7, 3.8, 1.4];
+const SPARK = [5, 2.6, 0.9];
 
 const SIZES = {
   S: { fire: 6, fireSize: [2, 5], smoke: 7, smokeSize: [3, 9], sparks: 10, debris: 0, light: 900, lightR: 40, shake: 0.35, radius: 60, sound: 'explosionS', scorch: 3 },
@@ -49,7 +49,7 @@ export class Effects {
       scene.add(l);
       this.lights.push(l);
     }
-    this.flareLight = new THREE.PointLight(0xfff2d0, 0, 900, 1.2);
+    this.flareLight = new THREE.PointLight(0xfff2d0, 0, 800, 2);
     scene.add(this.flareLight);
 
     // Debris chunks.
@@ -297,9 +297,13 @@ export class Effects {
     const ground = heightAt(x, z);
     const inWater = water ?? (ground < 0 && y < 1.5);
     const onGround = !air && !inWater && y - ground < 2.5;
-    const k = size === 'L' ? 1.6 : size === 'M' ? 1 : 0.55;
+    // Hits right on the bunker happen a few metres from the gunner: keep them from filling the screen.
+    const cam = this.game.camera.position;
+    const camDist = Math.hypot(x - cam.x, y - cam.y, z - cam.z);
+    const near = Math.min(1, Math.max(0.3, camDist / 18));
+    const k = (size === 'L' ? 1.6 : size === 'M' ? 1 : 0.55) * near;
 
-    this.flash(x, y + 0.5, z, cfg.fireSize[1] * 2.6, [10, 7, 4], 0.14);
+    this.flash(x, y + 0.5, z, cfg.fireSize[1] * 2 * near, [7, 5, 3], 0.12);
     this.light(x, y + 2, z, cfg.light, cfg.lightR, size === 'L' ? 0.55 : 0.3);
 
     if (inWater) {
@@ -316,8 +320,8 @@ export class Effects {
           _v.y + (air ? 0 : 2),
           _v.z,
           rand(0.45, 0.95) * (size === 'L' ? 1.3 : 1),
-          rand(cfg.fireSize[0], cfg.fireSize[1]) * 0.5,
-          rand(cfg.fireSize[0], cfg.fireSize[1]),
+          rand(cfg.fireSize[0], cfg.fireSize[1]) * 0.5 * near,
+          rand(cfg.fireSize[0], cfg.fireSize[1]) * near,
           FIRE0,
           FIRE1,
           1,
@@ -338,8 +342,8 @@ export class Effects {
           _v.y + rand(1.5, 4) * k,
           _v.z,
           rand(3, 7) * (size === 'L' ? 1.4 : 1),
-          rand(cfg.smokeSize[0], cfg.smokeSize[1]) * 0.35,
-          rand(cfg.smokeSize[0], cfg.smokeSize[1]),
+          rand(cfg.smokeSize[0], cfg.smokeSize[1]) * 0.35 * near,
+          rand(cfg.smokeSize[0], cfg.smokeSize[1]) * near,
           dark < 0.6 ? SMOKE_DARK : SMOKE_MID,
           SMOKE_MID,
           air ? 0.6 : 0.85,
@@ -532,7 +536,7 @@ export class Effects {
       const k = Math.min(1, f.t / 1.5) * Math.min(1, (f.dur - f.t) / 3);
       if (flareI === 0) {
         this.flareLight.position.set(f.x, f.y, f.z);
-        flareI = k * (2.2e5 + Math.random() * 3e4);
+        flareI = k * (4.5e4 + Math.random() * 6e3);
       }
       this.flash(f.x, f.y, f.z, 6 * k + 1, [12, 11, 8], 0.05);
       if (Math.random() < dt * 8) this.puff(this.alpha, f.x, f.y + 0.5, f.z, 0.5, 0.6, 0, 5, 1, 4, SMOKE_MID, SMOKE_MID, 0.35, 0.3, -0.2, 0.1);

@@ -12,10 +12,10 @@ import { damp } from '../core/math.js';
 // Camera-space placement of each first-person weapon (tuned by eye).
 export const VIEW_POSE = {
   mg: { pos: [0, -0.5, -0.12], rot: [0.02, 0, 0] },
-  at: { pos: [0, -0.52, -0.1], rot: [0.02, 0, 0] },
-  missile: { pos: [0, -0.5, -0.25], rot: [0.02, 0, 0] },
-  pistol: { pos: [0.3, -0.34, -0.62], rot: [0, 0, 0] },
-  howitzer: { pos: [0, -0.62, -0.1], rot: [0.02, 0, 0] },
+  at: { pos: [0.32, -1.0, -0.1], rot: [0.13, 0, 0] },
+  missile: { pos: [0, -0.62, -0.85], rot: [0.02, 0, 0] },
+  pistol: { pos: [0.2, -0.22, -0.5], rot: [0, 0, 0] },
+  howitzer: { pos: [0, -1.0, 0.2], rot: [-0.02, 0, 0] },
 };
 
 const _v = new THREE.Vector3();
@@ -24,7 +24,7 @@ const _q = new THREE.Quaternion();
 function flashMesh(scale = 1) {
   const g = new THREE.Group();
   const star = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.55 * scale, 0.55 * scale),
+    new THREE.PlaneGeometry(0.34 * scale, 0.34 * scale),
     new THREE.MeshBasicMaterial({
       map: makeFlashTexture(),
       transparent: true,
@@ -44,11 +44,12 @@ function flashMesh(scale = 1) {
     side: THREE.DoubleSide,
     toneMapped: false,
   });
+  const sideGeo = new THREE.PlaneGeometry(0.7 * scale, 0.26 * scale);
+  sideGeo.translate(0.35 * scale, 0, 0);
+  sideGeo.rotateY(Math.PI / 2); // extends along -Z, out of the muzzle
   for (let i = 0; i < 2; i++) {
-    const side = new THREE.Mesh(new THREE.PlaneGeometry(0.9 * scale, 0.36 * scale), sideMat);
-    side.geometry.translate(0.45 * scale, 0, 0);
-    side.rotation.y = Math.PI / 2; // extends along -Z (out of the muzzle)
-    side.rotation.x = (i * Math.PI) / 2;
+    const side = new THREE.Mesh(sideGeo, sideMat);
+    side.rotation.z = (i * Math.PI) / 2; // spin around the barrel axis
     g.add(side);
   }
   g.visible = false;
@@ -89,6 +90,7 @@ export class Viewmodels {
       model.base = VIEW_POSE[name];
     }
     const mg = this.models.mg;
+    if (mg.sight) mg.sight.visible = false; // the HUD crosshair replaces the ring sight
     this.flashes = {
       mgL: this.attachFlash(mg.muzzleL, 1),
       mgR: this.attachFlash(mg.muzzleR, 1),

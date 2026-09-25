@@ -19,6 +19,7 @@ function analyzeHDR(tex) {
   const sunCol = new THREE.Color(0, 0, 0);
   let wsum = 0;
   const thr = maxLum * 0.6;
+  const lums = [];
   const horizon = new THREE.Color(0, 0, 0);
   let hn = 0;
   for (let r = 0; r < H; r++) {
@@ -30,6 +31,9 @@ function analyzeHDR(tex) {
       const G = data[i + 1];
       const B = data[i + 2];
       const phi = ((c + 0.5) / W - 0.5) * Math.PI * 2;
+      if (el > 0.09 && el < 1.0 && (c & 3) === 0) {
+        lums.push(Math.min(48, R) * 0.2126 + Math.min(48, G) * 0.7152 + Math.min(48, B) * 0.0722);
+      }
       if (el > 0.0 && el < 0.06) {
         horizon.r += R;
         horizon.g += G;
@@ -52,10 +56,17 @@ function analyzeHDR(tex) {
     }
   }
   dir.normalize();
+  // The sun disc can exceed half-float range, which turns the PMREM blur into NaN (black materials).
+  // Its light comes from the DirectionalLight anyway, so clamp it in the texture.
+  const CLAMP = 48;
+  for (let i = 0; i < data.length; i++) if (data[i] > CLAMP) data[i] = CLAMP;
+  tex.needsUpdate = true;
   const m = Math.max(sunCol.r, sunCol.g, sunCol.b) || 1;
   sunCol.setRGB(sunCol.r / m, sunCol.g / m, sunCol.b / m);
   horizon.setRGB(horizon.r / hn, horizon.g / hn, horizon.b / hn);
-  const result = { dir, sunColor: sunCol, horizon, maxLum };
+  lums.sort((x, y) => x - y);
+  const median = lums[lums.length >> 1] || 1;
+  const result = { dir, sunColor: sunCol, horizon, maxLum, median };
   analysisCache.set(tex, result);
   return result;
 }
@@ -123,14 +134,19 @@ export class Sky {
     this.envMap = this.scene.environment;
     this.rotation = rot;
 
-    const el = Math.max(Math.asin(THREE.MathUtils.clamp(a.dir.y, -1, 1)), preset.minElevation);
+    const el = preset.elevation ?? Math.max(Math.asin(THREE.MathUtils.clamp(a.dir.y, -1, 1)), preset.minElevation);
     this.sunDir.set(Math.sin(b) * Math.cos(el), Math.sin(el), -Math.cos(b) * Math.cos(el)).normalize();
     this.sun.color.copy(a.sunColor).lerp(new THREE.Color(1, 1, 1), name === 'day' ? 0.35 : 0.15);
+    if (preset.sunColor) this.sun.color.setHex(preset.sunColor);
     this.sun.intensity = preset.sunIntensity;
     this.hemi.intensity = preset.hemi;
     this.hemi.color.copy(a.horizon).multiplyScalar(1 / Math.max(0.001, Math.max(a.horizon.r, a.horizon.g, a.horizon.b)));
 
-    this.fog.color.copy(a.horizon);
+    // HDRIs are exposure-normalised photos: scale each so its sky has the preset's brightness.
+    const skyScale = (preset.skyMedian ?? a.median) / a.median;
+    this.scene.backgroundIntensity = skyScale;
+    this.scene.environmentIntensity = skyScale * (preset.envBoost ?? 1);
+    this.fog.color.copy(a.horizon).multiplyScalar(skyScale);
     this.fog.density = preset.fogDensity;
     this.horizonColor = a.horizon.clone();
     this.renderer.toneMappingExposure = preset.exposure;

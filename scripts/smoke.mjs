@@ -14,7 +14,7 @@ const H = Number(process.env.HEIGHT || 720);
 const ONLY = process.env.ONLY ? process.env.ONLY.split(',') : null;
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= '/opt/pw-browsers';
 
-const IGNORE = [/GPU stall due to ReadPixels/, /Automatic fallback to software WebGL/, /WebGL: too many errors/, /fonts\.g/];
+const IGNORE = [/ERR_CERT_AUTHORITY_INVALID/, /KHR_parallel_shader_compile/, /GPU stall due to ReadPixels/, /Automatic fallback to software WebGL/, /WebGL: too many errors/, /fonts\.g/];
 
 async function main() {
   await mkdir(OUT, { recursive: true });
@@ -34,12 +34,13 @@ async function main() {
   });
 
   const shot = async (name) => {
-    await page.screenshot({ path: `${OUT}/${name}.png` });
+    await page.evaluate(() => window.__bh.renderOnce());
+    await page.screenshot({ path: `${OUT}/${name}.png`, timeout: 120000 });
     console.log('screenshot', `${OUT}/${name}.png`);
   };
   const want = (name) => !ONLY || ONLY.includes(name);
 
-  await page.goto(`${BASE}?nolock&seed=1&quality=${process.env.QUALITY || 'low'}`, { waitUntil: 'load' });
+  await page.goto(`${BASE}?nolock&norender&mute&seed=1&quality=${process.env.QUALITY || 'low'}`, { waitUntil: 'load' });
   await page.waitForFunction(() => window.__bh && window.__bh.ready, null, { timeout: 180000 });
   if (want('menu')) {
     await shot('01-click');

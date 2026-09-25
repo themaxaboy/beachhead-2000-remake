@@ -125,7 +125,7 @@ export class Game {
   newStats() {
     const kills = {};
     for (const k of Object.keys(UNITS)) kills[k] = 0;
-    return { kills, damageTaken: 0, crates: 0 };
+    return { kills, damageTaken: 0, damageBy: {}, crates: 0 };
   }
 
   // ------------------------------------------------------------------ settings
@@ -483,7 +483,10 @@ export class Game {
 
   stepSim(dt) {
     this.time += dt;
+    const dmg = this.renderer.damage;
+    dmg.uFlash.value = Math.max(0, dmg.uFlash.value - dt * 2.2);
     const playing = this.state === 'playing';
+    if (this.bot && playing) this.bot.update(dt);
     this.weapons.update(dt, playing && this.input.fire);
     if (playing) this.level.update(dt);
     this.entities.update(dt);
@@ -526,7 +529,6 @@ export class Game {
 
   draw(dt) {
     const d = this.renderer.damage;
-    d.uFlash.value = Math.max(0, d.uFlash.value - dt * 2.2);
     const low = this.bunker && this.state === 'playing' && this.bunker.shield < 25 ? 0.5 + 0.5 * Math.sin(this.realTime * 6) : 0;
     d.uLow.value = low * (1 - this.bunker.shield / 25);
     this.viewmodels.update(dt, this.lookDX, this.lookDY);

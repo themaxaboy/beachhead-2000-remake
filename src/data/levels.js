@@ -45,9 +45,9 @@ export function generateLevel(n) {
   units.paratroopersPerCH53 = 8;
 
   const ammo = {
-    bullets: Math.min(round50(1200 + 40 * (L - 1)), 3600),
-    projectiles: 10 + Math.floor(1.5 * units.tanks + units.apcs + 0.5 * units.infantryLCT),
-    missiles: 8 + Math.floor(0.5 * (units.jets + units.cobras + units.ch53)),
+    bullets: Math.min(round50(1200 + 50 * (L - 1)), 4500),
+    projectiles: 12 + Math.floor(2 * units.tanks + 1.5 * units.apcs + units.infantryLCT),
+    missiles: 8 + units.jets + units.cobras + units.ch53,
     howitzer: L % 5 === 0 ? 2 + Math.floor(L / 20) : 0,
   };
 

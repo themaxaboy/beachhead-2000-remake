@@ -97,7 +97,7 @@ export class Tank extends GroundVehicle {
 
   shoot(a) {
     this.model.muzzle.getWorldPosition(_v);
-    this.game.enemyFire.tankShell(_v.clone(), rng.chance(ag(a, 0.3, 0.8)), 5);
+    this.game.enemyFire.tankShell(_v.clone(), rng.chance(ag(a, 0.25, 0.65)), 4);
     this.recoil = 1;
     this.game.effects.trail(this.pos.x, this.pos.y + 0.5, this.pos.z, 'dust');
   }

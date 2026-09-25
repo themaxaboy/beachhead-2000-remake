@@ -125,6 +125,7 @@ export class EnemyFire {
       width: opts.width || 0.07,
       len: opts.len || 7,
       whizzed: false,
+      src: opts.kind,
     });
   }
 
@@ -232,11 +233,12 @@ export class EnemyFire {
         const z = b.pos.z;
         fx.explosion(x, Math.max(0, ground), z, b.big ? 'L' : 'M');
         const d = Math.hypot(x - BUNKER.x, z - BUNKER.z);
+        const kind = b.big ? 'b52bomb' : 'jetbomb';
         if (b.big) {
-          if (d < 15) game.bunker.damage(5, b.pos);
-          else if (d < 35) game.bunker.damage(2, b.pos);
-        } else if (d < 8) game.bunker.damage(7, b.pos);
-        else if (d < 20) game.bunker.damage(3, b.pos);
+          if (d < 15) game.bunker.damage(5, b.pos, kind);
+          else if (d < 35) game.bunker.damage(2, b.pos, kind);
+        } else if (d < 8) game.bunker.damage(7, b.pos, kind);
+        else if (d < 20) game.bunker.damage(3, b.pos, kind);
         // bombs also hurt their own troops
         game.infantry.splash(x, ground, z, b.big ? 14 : 10, 'bomb');
       }
@@ -251,7 +253,7 @@ export class EnemyFire {
     switch (s.kind) {
       case 'bullet':
         if (s.hit) {
-          game.bunker.damage(s.damage, s.from);
+          game.bunker.damage(s.damage, s.from, s.src || 'bullet');
           fx.metalHit(p.x, p.y, p.z);
           if (rng.chance(0.3)) game.audio?.play('impactMetal', { position: p, volume: 0.7 });
         } else if (p.y < heightAt(p.x, p.z) + 1) {
@@ -262,17 +264,17 @@ export class EnemyFire {
         break;
       case 'shell':
         fx.explosion(p.x, p.y, p.z, 'S');
-        if (s.hit) game.bunker.damage(s.damage, s.from);
-        else if (p.length() < 12) game.bunker.damage(s.damage * 0.2, s.from);
+        if (s.hit) game.bunker.damage(s.damage, s.from, 'tank');
+        else if (p.length() < 12) game.bunker.damage(s.damage * 0.2, s.from, 'tank');
         break;
       case 'rocket':
         fx.explosion(p.x, p.y, p.z, 'S');
-        if (s.hit) game.bunker.damage(s.damage, s.from);
+        if (s.hit) game.bunker.damage(s.damage, s.from, 'rocket');
         break;
       case 'grenade':
         this.releaseMesh(s.mesh);
         fx.explosion(p.x, p.y, p.z, 'S', { sound: true });
-        if (s.hit) game.bunker.damage(s.damage, s.from);
+        if (s.hit) game.bunker.damage(s.damage, s.from, 'grenade');
         break;
     }
   }

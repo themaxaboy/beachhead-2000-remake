@@ -1,4 +1,5 @@
 import { DEG } from '../core/math.js';
+import { Bot } from './Bot.js';
 
 /** window.__game helpers for automated tests and quick debugging (?debug adds cheat keys). */
 export function installDebug(game) {
@@ -43,6 +44,37 @@ export function installDebug(game) {
       for (const e of game.entities.list) if (e.alive && e.required) e.destroy('debug');
       game.infantry.forEachAlive((i) => game.infantry.kill(i, 'debug'));
       for (const ev of game.level.events) ev.done = true;
+    },
+    setBot(on = true) {
+      game.bot = on ? new Bot(game) : null;
+      if (!on) game.input.fire = false;
+    },
+    /** Plays a mission with the bot in simulated time and reports the outcome. */
+    async simulate(n, maxSeconds = 900) {
+      await api.start(n, true);
+      api.setBot(true);
+      let t = 0;
+      while (t < maxSeconds && game.state === 'playing') {
+        game.advance(1, 1 / 30);
+        t += 1;
+      }
+      const w = game.weapons.ammo;
+      const def = game.level.def;
+      const res = {
+        level: n,
+        result: game.state === 'playing' ? 'timeout' : game.state === 'dying' || game.state === 'gameover' ? 'dead' : 'won',
+        time: Math.round(game.level.time),
+        limit: def.timeLimit,
+        shield: Math.round(game.bunker.shield),
+        force: Math.round(game.level.enemyForce * 100),
+        ammoLeft: { mg: w.mg, at: w.at, missile: w.missile },
+        ammoStart: { mg: def.ammo.bullets, at: def.ammo.projectiles, missile: def.ammo.missiles },
+        crates: game.stats.crates,
+        score: game.score,
+        damageBy: Object.fromEntries(Object.entries(game.stats.damageBy).map(([k, v]) => [k, Math.round(v)])),
+      };
+      api.setBot(false);
+      return res;
     },
     setInvulnerable(v = true) {
       game.bunker.invulnerable = v;

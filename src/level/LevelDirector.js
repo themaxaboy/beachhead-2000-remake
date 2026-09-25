@@ -128,12 +128,28 @@ export class LevelDirector {
     }
   }
 
+  /** True when the player has nothing left that can hurt the armour / aircraft still alive. */
+  starved() {
+    const game = this.game;
+    const w = game.weapons.ammo;
+    let armour = false;
+    let air = false;
+    for (const e of game.entities.list) {
+      if (!e.alive || !e.required) continue;
+      if (e.type === 'tank' || e.type === 'apc' || e.type === 'lct') armour = true;
+      if (e.isAir) air = true;
+    }
+    return (armour && w.at + w.missile === 0) || (air && w.missile === 0 && w.mg < 100) || w.mg <= 0;
+  }
+
   updateSupply() {
     const game = this.game;
     const s = CONFIG.supply;
-    if (this.cratesLeft <= 0) return;
     const w = game.weapons;
-    const lowAmmo = w.ammo.mg < this.def.ammo.bullets * 0.25;
+    const starved = this.starved();
+    // Normally a limited number of drops per mission, but never leave the player unable to finish.
+    if (this.cratesLeft <= 0 && !starved) return;
+    const lowAmmo = w.ammo.mg < this.def.ammo.bullets * 0.25 || starved;
     const lowShield = game.bunker.shield < 40;
     if ((lowAmmo || lowShield) && this.nextSupply - this.time > s.urgentMax && this.time - this.lastSupply > s.minGap) {
       this.nextSupply = this.time + rng.range(s.urgentMin, s.urgentMax);
@@ -141,12 +157,13 @@ export class LevelDirector {
     if (this.time >= this.nextSupply) {
       this.lastSupply = this.time;
       this.nextSupply = this.time + rng.range(s.intervalMin, s.intervalMax);
-      const n = Math.min(this.cratesLeft, rng.chance(0.5) ? 2 : 1);
-      this.cratesLeft -= n;
+      const n = Math.max(1, Math.min(this.cratesLeft, rng.chance(0.5) ? 2 : 1));
+      this.cratesLeft = Math.max(0, this.cratesLeft - n);
       const kinds = [];
       for (let i = 0; i < n; i++) {
         let kind;
-        if (game.bunker.shield <= 50) kind = rng.chance(0.7) ? 'shield' : 'ammo';
+        if (starved && i === 0) kind = 'ammo';
+        else if (game.bunker.shield <= 50) kind = rng.chance(0.7) ? 'shield' : 'ammo';
         else if (w.ammo.mg < this.def.ammo.bullets * 0.3) kind = rng.chance(0.8) ? 'ammo' : 'shield';
         else kind = rng.chance(0.5) ? 'ammo' : 'shield';
         kinds.push(kind);
