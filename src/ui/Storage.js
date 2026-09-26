@@ -75,7 +75,16 @@ export function addScore(name, score, level) {
 }
 
 export function loadProgress() {
-  return { highestLevel: 1, ...read(PROGRESS_KEY, {}) };
+  const p = { highestLevel: 1, ...read(PROGRESS_KEY, {}) };
+  // lastCleared: last campaign mission completed (older saves only kept highestLevel).
+  if (!Number.isInteger(p.lastCleared)) p.lastCleared = Math.max(0, p.highestLevel - 1);
+  return p;
+}
+
+/** Mission the campaign resumes from: the one after the last mission cleared. */
+export function resumeLevel(levelCount) {
+  const { lastCleared } = loadProgress();
+  return lastCleared >= levelCount ? 1 : lastCleared + 1;
 }
 
 export function saveProgress(p) {

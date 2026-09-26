@@ -1,4 +1,4 @@
-import { loadScores, qualifies, addScore, loadProgress } from './Storage.js';
+import { loadScores, qualifies, addScore, resumeLevel } from './Storage.js';
 import { levelFileText, LEVEL_COUNT } from '../data/levels.js';
 import { UNITS } from '../data/units.js';
 
@@ -38,6 +38,8 @@ export class Menus {
     const g = this.game;
     switch (action) {
       case 'play':
+        return g.startCampaign(resumeLevel(LEVEL_COUNT), false);
+      case 'newgame':
         return g.startCampaign(1, false);
       case 'levels':
         return this.show('levels');
@@ -99,9 +101,15 @@ export class Menus {
   }
 
   render_main() {
+    const resume = resumeLevel(LEVEL_COUNT);
+    const play =
+      resume > 1
+        ? `<button data-action="play">RESUME · MISSION ${String(resume).padStart(2, '0')}</button>
+        <button data-action="newgame">NEW GAME</button>`
+        : '<button data-action="play">PLAY</button>';
     return `${TITLE}
       <nav class="menu">
-        <button data-action="play">PLAY</button>
+        ${play}
         <button data-action="levels">LEVEL SELECT</button>
         <button data-action="help">HELP</button>
         <button data-action="scores">HIGH SCORES</button>
@@ -112,13 +120,11 @@ export class Menus {
   }
 
   render_levels() {
-    const { highestLevel } = loadProgress();
     let cells = '';
     for (let i = 1; i <= LEVEL_COUNT; i++) {
-      const locked = i > highestLevel;
-      cells += `<button class="lvl${locked ? ' locked' : ''}" ${locked ? 'disabled' : `data-action="level" data-level="${i}"`}>${String(i).padStart(2, '0')}</button>`;
+      cells += `<button class="lvl" data-action="level" data-level="${i}">${String(i).padStart(2, '0')}</button>`;
     }
-    return `<h2>LEVEL SELECT</h2><p class="fine">Practice any mission you have reached. Practice scores are not recorded.</p>
+    return `<h2>LEVEL SELECT</h2><p class="fine">Practice any of the 60 missions. Practice scores are not recorded.</p>
       <div class="level-grid">${cells}</div>
       <button data-action="main">BACK</button>`;
   }

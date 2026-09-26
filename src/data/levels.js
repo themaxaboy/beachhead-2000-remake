@@ -86,13 +86,17 @@ export function generateLevel(n) {
   const waveSize = 1 + Math.ceil(L / 15);
   const waves = [];
   for (let i = 0; i < cargo.length; i += waveSize) waves.push(cargo.slice(i, i + waveSize));
-  const lastWaveT = 0.7 * timeLimit;
+  // Waves follow each other closely (a fixed gap that shrinks with level) instead of being
+  // stretched across the whole time limit, so the player is not left waiting between them.
+  const waveGap = lerp(14, 8, p);
+  const lastWaveT = Math.min(0.7 * timeLimit, 4 + Math.max(0, waves.length - 1) * waveGap);
+  const lastLandT = Math.min(0.7 * timeLimit, lastWaveT + (waveSize - 1) * 2.5);
   waves.forEach((wave, wi) => {
     const base = waves.length === 1 ? 4 : 4 + (wi / (waves.length - 1)) * (lastWaveT - 4);
     const t = wi === 0 ? 4 : base * rng.range(0.85, 1.15);
     wave.forEach((kind, k) => {
       const zone = rng.int(0, zones.length - 1);
-      schedule.push({ t: round1(Math.min(t + k * 2.5, lastWaveT)), kind: 'lct', cargo: kind, zone });
+      schedule.push({ t: round1(Math.min(t + k * 2.5, lastLandT)), kind: 'lct', cargo: kind, zone });
     });
   });
 
@@ -102,12 +106,12 @@ export function generateLevel(n) {
       schedule.push({ t: round1(clamp(base + rng.range(-8, 8), t0, t1)), kind });
     }
   };
-  const airEnd = 0.75 * timeLimit;
+  const airEnd = Math.min(0.75 * timeLimit, Math.max(60, lastWaveT + 25));
   spreadAir('jet', units.jets, 20, airEnd);
   spreadAir('cobra', units.cobras, 30, airEnd);
   spreadAir('ch53', units.ch53, 25, airEnd);
   for (let i = 0; i < units.bomberRaids; i++) {
-    const t = timeLimit * (0.25 + (0.6 * i) / Math.max(1, units.bomberRaids));
+    const t = airEnd * (0.3 + (0.7 * i) / Math.max(1, units.bomberRaids));
     schedule.push({ t: round1(Math.min(t, airEnd)), kind: 'bomberRaid', count: units.bombersPerRaid });
   }
   schedule.sort((a, b) => a.t - b.t);

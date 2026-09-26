@@ -378,6 +378,7 @@ export class Game {
     if (!this.practice) {
       const p = loadProgress();
       p.highestLevel = Math.max(p.highestLevel, Math.min(LEVEL_COUNT, def.number + 1));
+      p.lastCleared = def.number;
       saveProgress(p);
     }
     this.state = 'complete';

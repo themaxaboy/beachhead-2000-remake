@@ -28,6 +28,8 @@ export const CONFIG = {
     shieldCarryover: false, // shield resets each mission
     overtime: 'bombers', // after the time limit bomber raids keep coming until the beach is clear
     overtimeRaidInterval: 40,
+    lullDelay: 2.5, // seconds until the next wave once the beach is clear
+    lullInfantry: 4, // this many stragglers still counts as clear
     timeBonusPerSecond: 5,
     shieldBonus: 20,
     levelBonus: 500,

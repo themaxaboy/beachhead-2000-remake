@@ -85,6 +85,7 @@ export class LevelDirector {
       if (e.type === 'lct' && e.required) lctAlive++;
       if (AIR_TYPES.has(e.type)) airAlive++;
     }
+    this.skipLull(lctAlive + airAlive);
     for (const ev of this.events) {
       if (ev.done || ev.t > this.time) continue;
       if (ev.kind === 'lct') {
@@ -126,6 +127,16 @@ export class LevelDirector {
       this.complete = true;
       game.onLevelComplete();
     }
+  }
+
+  /** When the beach is (nearly) clear, bring the rest of the schedule forward so the next wave arrives right away. */
+  skipLull(active) {
+    if (active > 0 || this.game.infantry.aliveCount > CONFIG.rules.lullInfantry) return;
+    let next = Infinity;
+    for (const ev of this.events) if (!ev.done && ev.kind !== 'bomberRaid' && ev.t < next) next = ev.t;
+    const shift = next - (this.time + CONFIG.rules.lullDelay);
+    if (next === Infinity || !(shift > 0)) return;
+    for (const ev of this.events) if (!ev.done) ev.t = Math.max(this.time, ev.t - shift);
   }
 
   /** True when the player has nothing left that can hurt the armour / aircraft still alive. */
