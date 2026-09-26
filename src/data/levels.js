@@ -86,9 +86,9 @@ export function generateLevel(n) {
   const waveSize = 1 + Math.ceil(L / 15);
   const waves = [];
   for (let i = 0; i < cargo.length; i += waveSize) waves.push(cargo.slice(i, i + waveSize));
-  // Waves follow each other closely (a fixed gap that shrinks with level) instead of being
+  // Waves follow each other closely (a fixed gap that shrinks a little with level) instead of being
   // stretched across the whole time limit, so the player is not left waiting between them.
-  const waveGap = lerp(14, 8, p);
+  const waveGap = lerp(16, 11, p);
   const lastWaveT = Math.min(0.7 * timeLimit, 4 + Math.max(0, waves.length - 1) * waveGap);
   const lastLandT = Math.min(0.7 * timeLimit, lastWaveT + (waveSize - 1) * 2.5);
   waves.forEach((wave, wi) => {
