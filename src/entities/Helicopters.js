@@ -103,7 +103,7 @@ export class Cobra extends Helicopter {
     this.addSphere(0, 0.3, -0.5, 1.5);
     this.addSphere(0, 0.8, -4.5, 1.0);
     const a = this.aggression;
-    this.ring = ag(a.heliGun, 470, 260);
+    this.ring = ag(a.heliGun, 320, 180);
     this.bearing = bearing;
     const r = 2200;
     this.pos.set(Math.sin(bearing) * r, 60, -Math.cos(bearing) * r);

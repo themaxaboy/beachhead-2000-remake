@@ -92,14 +92,15 @@ export class Jet extends Aircraft {
     this.addSphere(-3.2, 0, -1.2, 1.5);
     this.addSphere(0, 0, -6.5, 1.4);
     const a = this.aggression.jet;
-    this.runSpeed = ag(a, 150, 205);
-    this.runAlt = ag(a, 125, 45);
+    // Kept low, slow-ish and close to the bunker so the jet is a fair target.
+    this.runSpeed = ag(a, 125, 175);
+    this.runAlt = ag(a, 70, 32);
     this.speed = this.runSpeed;
     this.approach = bearing;
-    const r = 2700;
-    this.pos.set(Math.sin(bearing) * r, 320, -Math.cos(bearing) * r);
+    const r = 2000;
+    this.pos.set(Math.sin(bearing) * r, 200, -Math.cos(bearing) * r);
     this.yaw = Math.atan2(-this.pos.x, -this.pos.z);
-    this.targetAlt = 320;
+    this.targetAlt = 200;
     this.startRun();
     this.gunTimer = 0;
     this.startLoop('jetLoop', 1);
@@ -108,7 +109,7 @@ export class Jet extends Aircraft {
 
   startRun() {
     this.setState('run');
-    this.offset = rng.range(-35, 35);
+    this.offset = rng.range(-18, 18);
     this.bombsLeft = this.game.level.progress >= 0.4 ? 4 : 2;
     this.bombTimer = 0;
     const a = this.aggression.jet;
@@ -139,7 +140,7 @@ export class Jet extends Aircraft {
         if (along > 350) this.steerTo(tx, tz, dt, 0.6);
         else this.bank *= 1 - Math.min(1, dt * 2);
         const d = Math.hypot(this.pos.x - tx, this.pos.z - tz);
-        this.targetAlt = d < 1800 ? this.runAlt : 320;
+        this.targetAlt = d < 1500 ? this.runAlt : 200;
         this.speed = this.runSpeed;
         if (along < 1150 && along > 380 && Math.abs(this.pos.y - this.runAlt) < 40) {
           this.gunTimer -= dt;
@@ -177,22 +178,22 @@ export class Jet extends Aircraft {
         break;
       }
       case 'egress':
-        this.targetAlt = 360;
+        this.targetAlt = 200;
         this.bank *= 0.95;
         this.roll = this.bank;
-        if (this.stateTime > 7) {
+        if (this.stateTime > 4.5) {
           // pick a new attack direction
           const cur = Math.atan2(this.pos.x, -this.pos.z);
           const anywhere = this.game.level.def.number >= 20;
           let b = cur + rng.sign() * rng.range(0.6, 2.4);
           if (!anywhere) b = clamp(wrapAngle(b), -1.35, 1.35);
-          this.entry = { x: Math.sin(b) * 2400, z: -Math.cos(b) * 2400 };
+          this.entry = { x: Math.sin(b) * 1600, z: -Math.cos(b) * 1600 };
           this.setState('turn');
           this.model.bombs.visible = true;
         }
         break;
       case 'turn': {
-        this.targetAlt = 340;
+        this.targetAlt = 180;
         this.steerTo(this.entry.x, this.entry.z, dt, 0.5);
         const d = Math.hypot(this.pos.x - this.entry.x, this.pos.z - this.entry.z);
         if (d < 450 || this.stateTime > 40) this.startRun();
@@ -222,15 +223,15 @@ export class Bomber extends Aircraft {
     this.root.add(this.model.root);
     for (const z of [-18, -8, 2, 12, 20]) this.addSphere(0, 0, z, 2.6);
     for (const x of [-20, -11, 11, 20]) this.addSphere(x, 0.5, 0, 3.2);
-    this.speed = 110;
-    this.targetAlt = 450;
+    this.speed = 95;
+    this.targetAlt = 260;
     const dirX = -Math.sin(bearing);
     const dirZ = Math.cos(bearing);
     const start = 3800 + trail;
     // path through (lateral offset) the bunker
-    this.pos.set(Math.sin(bearing) * start - dirZ * lateral, 450, -Math.cos(bearing) * start + dirX * lateral);
+    this.pos.set(Math.sin(bearing) * start - dirZ * lateral, this.targetAlt, -Math.cos(bearing) * start + dirX * lateral);
     this.yaw = Math.atan2(dirX, dirZ);
-    this.lead = this.speed * Math.sqrt((2 * 450) / G);
+    this.lead = this.speed * Math.sqrt((2 * this.targetAlt) / G);
     this.bombTimer = 0;
     this.bombs = 30;
     this.startLoop('b52Loop', 1);
