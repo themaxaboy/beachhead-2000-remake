@@ -114,7 +114,7 @@ export class InfantrySystem {
     this.phase[i] = rng.range(0, 6.28);
     this.seed[i] = rng.range(0, 100);
     this.anim[i] = 0;
-    this.speed[i] = rng.range(2.6, 3.5);
+    this.speed[i] = rng.range(3.8, 4.8);
     const p = this.game.level.progress;
     this.fireTimer[i] = rng.range(1.5, 4);
     this.grenadeTimer[i] = rng.range(4, lerp(12, 6, p));
@@ -353,7 +353,7 @@ export class InfantrySystem {
           }
           if (this.timer[i] <= 0) {
             this.state[i] = S_ADVANCE;
-            this.timer[i] = rng.range(3, 6);
+            this.timer[i] = rng.range(4.5, 8);
           }
           break;
         case S_ASSAULT: {
@@ -473,7 +473,7 @@ export class InfantrySystem {
     const zig = this.hasWaypoint[i] ? 0 : Math.sin(this.phase[i] * 0.23 + this.seed[i]) * 0.4;
     const want = Math.atan2(dx, dz) + zig;
     this.heading[i] += wrapAngle(want - this.heading[i]) * Math.min(1, dt * 5);
-    const sp = this.speed[i] * (wading ? 0.45 : 1);
+    const sp = this.speed[i] * (wading ? 0.55 : 1);
     this.x[i] += Math.sin(this.heading[i]) * sp * dt;
     this.z[i] += Math.cos(this.heading[i]) * sp * dt;
     this.y[i] = heightAt(this.x[i], this.z[i]);
@@ -482,7 +482,7 @@ export class InfantrySystem {
     this.timer[i] -= dt;
     if (this.timer[i] <= 0 && !wading && !this.hasWaypoint[i] && Math.hypot(this.x[i], this.z[i]) < 160) {
       this.state[i] = S_PRONE;
-      this.timer[i] = rng.range(1.8, 3.8);
+      this.timer[i] = rng.range(1.2, 2.5);
       this.fireTimer[i] = rng.range(0.6, 1.4);
     }
   }
