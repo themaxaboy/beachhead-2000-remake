@@ -275,7 +275,7 @@ export class WeaponSystem {
       if (!e.alive || !e.lockable || e.removed) continue;
       _to.subVectors(e.pos, cam);
       const d = _to.length();
-      if (d > 2600 || d < 15) continue;
+      if (d > W.missile.lockRange || d < 15) continue;
       const ang = _to.angleTo(_dir);
       if (ang < bestAng) {
         bestAng = ang;

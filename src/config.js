@@ -38,7 +38,7 @@ export const CONFIG = {
   weapons: {
     mg: { rate: 16, spread: 0.28 * DEG, speed: 950, life: 1.6, label: 'BULLETS' },
     at: { reload: 1.7, speed: 280, gravity: 9.81 * 0.55, spread: 0.05 * DEG, label: 'PROJECTILES' },
-    missile: { reload: 0.7, maxAirborne: 2, lockCone: 7 * DEG, label: 'MISSILES' },
+    missile: { reload: 0.7, maxAirborne: 2, lockCone: 7 * DEG, lockRange: 900, label: 'MISSILES' },
     pistol: { rate: 5, magazine: 15, reload: 1.5, spread: 0.15 * DEG, range: 350, label: 'HANDGUN' },
     howitzer: { reload: 3.5, speed: 190, gravity: 9.81 * 0.7, label: 'HOWITZER' },
   },

@@ -252,18 +252,18 @@ body {
 .lock::before {
   content: '';
   position: absolute;
-  left: -2.2em;
-  top: -2.2em;
-  width: 4.4em;
-  height: 4.4em;
+  left: -1.3em;
+  top: -1.3em;
+  width: 2.6em;
+  height: 2.6em;
   border: 2px solid var(--amber);
   border-radius: 2px;
   animation: lock-pulse 0.4s infinite alternate;
 }
 .lock span {
   position: absolute;
-  left: 2.6em;
-  top: -2.4em;
+  left: 1.9em;
+  top: -2em;
   font-size: 0.75em;
   color: var(--amber);
   display: none;
@@ -279,7 +279,7 @@ body {
 }
 @keyframes lock-pulse {
   to {
-    transform: scale(1.15);
+    transform: scale(1.1);
   }
 }
 
